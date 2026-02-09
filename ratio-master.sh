@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-readonly VERSION="1.0.2"
+readonly VERSION="1.0.3"
 
 ################################################################################
 # DEFAULT CONFIGURATION
