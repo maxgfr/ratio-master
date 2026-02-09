@@ -62,7 +62,7 @@ ln -s "$(pwd)/ratio-master.sh" /usr/local/bin/ratio-master
 ## Usage
 
 ```
-ratio-master.sh [OPTIONS] <file.torrent>
+ratio-master [OPTIONS] <file.torrent>
 ```
 
 ### Options
@@ -80,13 +80,13 @@ ratio-master.sh [OPTIONS] <file.torrent>
 
 ```bash
 # Start announcing with default speed (512 KB/s, runs until Ctrl+C)
-./ratio-master.sh my-file.torrent
+ratio-master my-file.torrent
 
 # Custom speed (1 MB/s)
-./ratio-master.sh --speed 1024 my-file.torrent
+ratio-master --speed 1024 my-file.torrent
 
 # Inspect torrent metadata and info_hash only
-./ratio-master.sh --dry-run my-file.torrent
+ratio-master --dry-run my-file.torrent
 ```
 
 ### Example output
