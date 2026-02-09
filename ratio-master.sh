@@ -36,7 +36,9 @@ VERBOSE=false
 INFO_HASH=""              # info_hash URL-encoded (%xx%xx...)
 INFO_HASH_HEX=""          # info_hash in hex (for display)
 PEER_ID=""                # peer_id URL-encoded
-ANNOUNCE_INTERVAL=1800    # interval between announces (updated by tracker)
+SESSION_KEY=""            # random key per session (tracker identification)
+SESSION_PORT=0            # randomized port for this session
+ANNOUNCE_INTERVAL=60      # interval between announces (updated by tracker)
 LAST_ANNOUNCE_TIME=0      # epoch of last successful announce
 
 # Respect the NO_COLOR standard (https://no-color.org/)
@@ -54,6 +56,17 @@ TORRENT_PIECES=""
 TORRENT_PIECE_LENGTH=""
 TORRENT_TRACKER=""
 TORRENT_COMMENT=""
+
+# Peer listener state
+LISTENER_PID=""
+LISTENER_TMPDIR=""
+NC_CMD=""
+
+# Download simulation state
+LEFT=0
+DOWNLOAD_COMPLETE=false
+DOWNLOAD_SPEED_KB=0
+PEER_ID_HEX=""
 
 ################################################################################
 # COLORS
@@ -81,6 +94,16 @@ setup_colors() {
 ################################################################################
 
 cleanup() {
+    # Kill peer listener if running
+    if [[ -n "${LISTENER_PID:-}" ]]; then
+        kill "$LISTENER_PID" 2>/dev/null || true
+        wait "$LISTENER_PID" 2>/dev/null || true
+        LISTENER_PID=""
+    fi
+    if [[ -n "${LISTENER_TMPDIR:-}" && -d "${LISTENER_TMPDIR:-}" ]]; then
+        rm -rf "$LISTENER_TMPDIR"
+        LISTENER_TMPDIR=""
+    fi
     # Restore cursor if interactive terminal
     if [[ -t 1 ]]; then
         printf '\033[?25h' 2>/dev/null || :
@@ -166,6 +189,13 @@ check_dependencies() {
     if [[ ${#missing[@]} -gt 0 ]]; then
         error "Missing required dependencies: ${missing[*]}"
     fi
+
+    # Detect netcat for peer listener (optional but recommended)
+    if command -v nc &>/dev/null; then
+        NC_CMD="nc"
+    elif command -v ncat &>/dev/null; then
+        NC_CMD="ncat"
+    fi
 }
 
 ################################################################################
@@ -242,7 +272,8 @@ parse_torrent_bash() {
     local content name="" size="" piece_length="" tracker="" comment=""
 
     # Read raw content as binary text
-    content=$(LC_ALL=C cat "$torrent_file" 2>/dev/null)
+    # Use tr to strip null bytes before bash sees them (avoids "ignored null byte" warning)
+    content=$(LC_ALL=C tr -d '\0' < "$torrent_file")
 
     # Torrent name - search for "4:name" followed by length and name
     if [[ "$content" =~ 4:name([0-9]+): ]]; then
@@ -461,11 +492,20 @@ compute_info_hash() {
 
     INFO_HASH_HEX="$sha1_hex"
 
-    # URL-encode: %xx for each byte of the SHA1 digest
+    # URL-encode like uTorrent: alphanumeric bytes stay as ASCII chars,
+    # everything else is percent-encoded (%xx lowercase)
     INFO_HASH=""
-    local i
+    local i byte_val
     for (( i=0; i<${#sha1_hex}; i+=2 )); do
-        INFO_HASH+="%${sha1_hex:$i:2}"
+        byte_val=$((16#${sha1_hex:$i:2}))
+        if (( (byte_val >= 48 && byte_val <= 57) ||
+              (byte_val >= 65 && byte_val <= 90) ||
+              (byte_val >= 97 && byte_val <= 122) )); then
+            # ASCII letter or digit — keep as-is
+            INFO_HASH+=$(printf '%b' "\\$(printf '%03o' "$byte_val")")
+        else
+            INFO_HASH+="%${sha1_hex:$i:2}"
+        fi
     done
 
     verbose "info_hash (hex): $INFO_HASH_HEX"
@@ -473,29 +513,150 @@ compute_info_hash() {
 }
 
 generate_peer_id() {
-    local random_part
-    random_part=$(LC_ALL=C head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 12)
+    # Emulate uTorrent 3.3.2 peer_id: -UT3320-<\x18><w><10 random bytes>
+    local random_hex
+    random_hex=$(LC_ALL=C head -c 10 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 20)
 
-    # Format: -RM0100-<12 random chars>
-    local raw="-RM0100-${random_part}"
+    # Build full 20-byte peer_id in hex
+    # "-UT3320-" = 2d 55 54 33 33 32 30 2d, \x18 = 18, "w" = 77
+    PEER_ID_HEX="2d5554333332302d1877${random_hex}"
 
-    # URL-encode: encode each byte
-    PEER_ID=""
-    local i ch
-    for (( i=0; i<${#raw}; i++ )); do
-        ch="${raw:$i:1}"
-        case "$ch" in
-            [a-zA-Z0-9._~])
-                PEER_ID+="$ch"
-                ;;
-            *)
-                PEER_ID+=$(printf '%%%02x' "'$ch")
-                ;;
-        esac
+    # URL-encode for tracker
+    PEER_ID="-UT3320-%18w"
+    local i
+    for (( i=0; i<${#random_hex}; i+=2 )); do
+        PEER_ID+="%${random_hex:$i:2}"
     done
 
-    verbose "peer_id (raw): $raw"
+    verbose "peer_id (hex): $PEER_ID_HEX"
     verbose "peer_id (url): $PEER_ID"
+}
+
+generate_session_key() {
+    # uTorrent uses 8-char uppercase hex key
+    SESSION_KEY=$(LC_ALL=C head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 8 | tr 'a-f' 'A-F')
+    verbose "session key: $SESSION_KEY"
+}
+
+generate_session_port() {
+    # Random port in typical uTorrent range
+    SESSION_PORT=$(( 10000 + (RANDOM % 55000) ))
+    verbose "session port: $SESSION_PORT"
+}
+
+# Round value to nearest multiple of denominator (like real BT clients)
+# uTorrent rounds uploaded to 16KB (0x4000) boundaries
+round_to_boundary() {
+    local value=$1
+    local boundary=$2
+    echo $(( boundary * (value / boundary) ))
+}
+
+# Return a randomized speed value that varies ±30% around target
+# Uses bash $RANDOM (0-32767) to avoid subshell forks
+randomize_speed() {
+    local target=$1
+    # Map $RANDOM (0-32767) to -300..+300 (representing -30.0% to +30.0%)
+    local deviation=$(( (RANDOM % 601) - 300 ))
+    # Apply deviation: target * (1000 + deviation) / 1000
+    local result=$(( target * (1000 + deviation) / 1000 ))
+    [[ $result -lt 1 ]] && result=1
+    echo "$result"
+}
+
+################################################################################
+# PEER LISTENER (BitTorrent protocol on announced port)
+################################################################################
+
+create_bt_handshake() {
+    local outfile="$1"
+    # BT handshake: \x13 + "BitTorrent protocol" + reserved(8) + info_hash(20) + peer_id(20)
+    # Reserved bytes: DHT + Extension Protocol + Fast = typical uTorrent 3.3.2
+    {
+        printf '\x13BitTorrent protocol'
+        printf '\x00\x00\x00\x00\x00\x10\x00\x05'
+        # info_hash as raw bytes
+        local i
+        for (( i=0; i<${#INFO_HASH_HEX}; i+=2 )); do
+            printf "\\x${INFO_HASH_HEX:$i:2}"
+        done
+        # peer_id as raw bytes
+        for (( i=0; i<${#PEER_ID_HEX}; i+=2 )); do
+            printf "\\x${PEER_ID_HEX:$i:2}"
+        done
+    } > "$outfile"
+}
+
+create_bt_bitfield() {
+    local outfile="$1"
+    local num_pieces="${2:-0}"
+    [[ "$num_pieces" == "?" || "$num_pieces" -le 0 ]] && return 0
+
+    local bitfield_len=$(( (num_pieces + 7) / 8 ))
+    local msg_len=$(( 1 + bitfield_len ))
+    {
+        # Message length (4 bytes big-endian)
+        printf "\\x$(printf '%02x' $(( (msg_len >> 24) & 0xFF )))"
+        printf "\\x$(printf '%02x' $(( (msg_len >> 16) & 0xFF )))"
+        printf "\\x$(printf '%02x' $(( (msg_len >> 8) & 0xFF )))"
+        printf "\\x$(printf '%02x' $(( msg_len & 0xFF )))"
+        # Message ID = 5 (bitfield)
+        printf '\x05'
+        # All pieces present (0xFF bytes)
+        local full_bytes=$(( num_pieces / 8 ))
+        local remaining_bits=$(( num_pieces % 8 ))
+        local j
+        for (( j=0; j<full_bytes; j++ )); do
+            printf '\xff'
+        done
+        # Last partial byte
+        if [[ $remaining_bits -gt 0 ]]; then
+            local last_byte=$(( (0xFF << (8 - remaining_bits)) & 0xFF ))
+            printf "\\x$(printf '%02x' "$last_byte")"
+        fi
+    } >> "$outfile"
+}
+
+start_peer_listener() {
+    if [[ -z "$NC_CMD" ]]; then
+        verbose "No netcat found, peer listener disabled (tracker may reject announces)"
+        return 0
+    fi
+
+    LISTENER_TMPDIR=$(mktemp -d)
+    create_bt_handshake "$LISTENER_TMPDIR/response"
+    create_bt_bitfield "$LISTENER_TMPDIR/response" "$TORRENT_PIECES"
+
+    # Append unchoke message (id=1): signal willingness to upload
+    {
+        printf '\x00\x00\x00\x01'  # length = 1
+        printf '\x01'              # id = 1 (unchoke)
+    } >> "$LISTENER_TMPDIR/response"
+
+    # Background listener loop: accept connections, send BT handshake+bitfield
+    (
+        trap 'exit 0' TERM INT
+        while true; do
+            "$NC_CMD" -l "$SESSION_PORT" < "$LISTENER_TMPDIR/response" >/dev/null 2>&1 || true
+            sleep 0.2
+        done
+    ) &
+    LISTENER_PID=$!
+    disown "$LISTENER_PID" 2>/dev/null || true
+
+    verbose "Peer listener active on port $SESSION_PORT (PID: $LISTENER_PID)"
+}
+
+stop_peer_listener() {
+    if [[ -n "${LISTENER_PID:-}" ]]; then
+        kill "$LISTENER_PID" 2>/dev/null || true
+        wait "$LISTENER_PID" 2>/dev/null || true
+        LISTENER_PID=""
+    fi
+    if [[ -n "${LISTENER_TMPDIR:-}" && -d "${LISTENER_TMPDIR:-}" ]]; then
+        rm -rf "$LISTENER_TMPDIR"
+        LISTENER_TMPDIR=""
+    fi
 }
 
 ################################################################################
@@ -510,27 +671,70 @@ send_announce() {
         return 1
     fi
 
-    # Build query parameters
-    local url="${TORRENT_TRACKER}"
-    url+="?info_hash=${INFO_HASH}"
-    url+="&peer_id=${PEER_ID}"
-    url+="&port=6881"
-    url+="&uploaded=${UPLOADED}"
-    url+="&downloaded=${DOWNLOADED}"
-    url+="&left=0"
-    url+="&compact=1"
+    # Round uploaded to 16KB boundary (0x4000) like real uTorrent
+    local rounded_uploaded
+    if [[ $UPLOADED -gt 0 ]]; then
+        rounded_uploaded=$(round_to_boundary "$UPLOADED" 16384)
+    else
+        rounded_uploaded=0
+    fi
 
+    # Round downloaded to 16KB boundary too (uTorrent does this consistently)
+    local rounded_downloaded
+    if [[ $DOWNLOADED -gt 0 ]]; then
+        rounded_downloaded=$(round_to_boundary "$DOWNLOADED" 16384)
+    else
+        rounded_downloaded=0
+    fi
+
+    # Build query — uTorrent 3.3.2 exact parameter order
+    # Template: info_hash&peer_id&port&uploaded&downloaded&left&corrupt=0&key&event&numwant&compact=1&no_peer_id=1
+    local url="${TORRENT_TRACKER}"
+    if [[ "$url" == *"?"* ]]; then
+        url+="&"
+    else
+        url+="?"
+    fi
+    url+="info_hash=${INFO_HASH}"
+    url+="&peer_id=${PEER_ID}"
+    url+="&port=${SESSION_PORT}"
+    url+="&uploaded=${rounded_uploaded}"
+    url+="&downloaded=${rounded_downloaded}"
+    url+="&left=${LEFT}"
+    url+="&corrupt=0"
+    url+="&key=${SESSION_KEY}"
     if [[ -n "$event" ]]; then
         url+="&event=${event}"
     fi
+    # Vary numwant: more peers wanted during download, fewer when seeding
+    local numwant
+    if [[ "$LEFT" -gt 0 ]]; then
+        numwant=200
+    else
+        numwant=$((50 + RANDOM % 151))
+    fi
+    url+="&numwant=${numwant}"
+    url+="&compact=1"
+    url+="&no_peer_id=1"
 
     verbose "Announce URL: $url"
 
     local tmpfile
     tmpfile=$(mktemp)
 
+    # Extract tracker host for Host header
+    local tracker_host
+    tracker_host=$(echo "$TORRENT_TRACKER" | sed -E 's|https?://([^/]+).*|\1|')
+
     local http_code
-    http_code=$(curl --silent --max-time 30 --output "$tmpfile" --write-out '%{http_code}' "$url" 2>/dev/null) || {
+    # Exact uTorrent 3.3.2 headers: Host, User-Agent, Accept-Encoding (nothing else)
+    # --header "Accept:" removes curl's default Accept: */* header
+    http_code=$(curl --silent --max-time 30 --compressed \
+        --header "Host: ${tracker_host}" \
+        --header "User-Agent: uTorrent/3320" \
+        --header "Accept-Encoding: gzip" \
+        --header "Accept:" \
+        --output "$tmpfile" --write-out '%{http_code}' "$url" 2>/dev/null) || {
         rm -f "$tmpfile"
         verbose "Network error during announce"
         echo "NETWORK_ERROR"
@@ -610,7 +814,12 @@ display_torrent_info() {
     echo ""
     echo "${BOLD}  ANNOUNCE PARAMETERS${RESET}"
     echo "  ${DIM}Speed:${RESET}            ${UPLOAD_SPEED} KB/s"
-    echo "  ${DIM}Mode:${RESET}             Announce (Ctrl+C to stop)"
+    echo "  ${DIM}Mode:${RESET}             Seed (Ctrl+C to stop)"
+    if [[ -n "$NC_CMD" ]]; then
+        echo "  ${DIM}Peer listener:${RESET}    Enabled (BT handshake on announced port)"
+    else
+        echo "  ${DIM}Peer listener:${RESET}    ${YELLOW}Disabled (install netcat for better results)${RESET}"
+    fi
 
     echo ""
 }
@@ -618,6 +827,30 @@ display_torrent_info() {
 ################################################################################
 # STATUS DISPLAY
 ################################################################################
+
+show_download_status() {
+    local downloaded=$1
+    local torrent_size=$2
+    local speed=$3
+    local elapsed=$4
+    local next_in=$5
+
+    local pct=0
+    if [[ $torrent_size -gt 0 ]]; then
+        pct=$((downloaded * 100 / torrent_size))
+    fi
+
+    local elapsed_str
+    elapsed_str=$(format_duration "$elapsed")
+
+    local next_str
+    next_str=$(format_duration "$next_in")
+
+    printf '\r\033[K  %s Downloading %d%% | %s / %s | %s KB/s | %s elapsed | next in %s ' \
+        "${BLUE}↓${RESET}" "$pct" \
+        "$(format_size "$downloaded")" "$(format_size "$torrent_size")" \
+        "$speed" "$elapsed_str" "$next_str"
+}
 
 show_status() {
     local uploaded=$1
@@ -638,7 +871,8 @@ show_status() {
     local next_str
     next_str=$(format_duration "$next_in")
 
-    printf '\r\033[K  %s uploaded | ratio %s | %s KB/s | %s elapsed | next announce in %s ' \
+    printf '\r\033[K  %s %s uploaded | ratio %s | %s KB/s | %s elapsed | next in %s ' \
+        "${GREEN}↑${RESET}" \
         "$(format_size "$uploaded")" "$ratio_str" \
         "$speed" "$elapsed_str" "$next_str"
 }
@@ -707,6 +941,7 @@ send_stopped_and_exit() {
     local result
     result=$(send_announce "stopped") || true
     verbose "Stopped announce result: ${result:-empty}"
+    stop_peer_listener
     show_final_results
     exit 0
 }
@@ -714,27 +949,35 @@ send_stopped_and_exit() {
 run_announce_loop() {
     compute_info_hash "$TORRENT_FILE"
     generate_peer_id
-
-    # Set downloaded = torrent size (pretend we have the full file)
-    if [[ "$TORRENT_SIZE" != "0" ]]; then
-        DOWNLOADED=$TORRENT_SIZE
-    else
-        DOWNLOADED=$((1024 * 1024 * 1024))
-    fi
+    generate_session_key
+    generate_session_port
 
     local torrent_size
     if [[ "$TORRENT_SIZE" != "0" ]]; then
         torrent_size=$TORRENT_SIZE
     else
-        torrent_size=$((1024 * 1024 * 1024))
+        torrent_size=$((1024 * 1024 * 1024))  # 1 GB default
     fi
+
+    # Seed mode: pretend we already have the full file
+    DOWNLOADED=$torrent_size
+    UPLOADED=0
+    LEFT=0
+
+    # Start peer listener (BT handshake responder on announced port)
+    start_peer_listener
 
     echo "  ${BOLD}${BLUE}STARTING ANNOUNCES${RESET}"
     echo "  ${DIM}(Ctrl+C to stop)${RESET}"
     echo ""
+    echo "  ${DIM}Seeding at ${UPLOAD_SPEED} KB/s${RESET}"
+    if [[ -n "$LISTENER_PID" ]]; then
+        echo "  ${DIM}Peer listener on port ${SESSION_PORT}${RESET}"
+    fi
+    echo ""
 
-    # Send initial "started" announce
-    verbose "Sending started announce..."
+    # Send initial "started" announce (left=0 = seeder)
+    verbose "Sending started announce (left=$LEFT)..."
     local result
     result=$(send_announce "started")
     case "$result" in
@@ -753,8 +996,6 @@ run_announce_loop() {
     esac
     echo ""
 
-    local speed_bytes=$((UPLOAD_SPEED * 1024))
-
     # Detect fractional sleep support
     local sleep_interval=1
     if sleep 0.1 2>/dev/null; then
@@ -768,31 +1009,37 @@ run_announce_loop() {
         updates_per_sec=1
     fi
 
-    local chunk_size=$((speed_bytes / updates_per_sec))
-    [[ $chunk_size -lt 1 ]] && chunk_size=1
-
     # Set up SIGINT trap
     trap 'send_stopped_and_exit' INT
 
     # Hide cursor during loop (terminal only)
     [[ -t 1 ]] && printf '\033[?25l'
 
-    UPLOADED=0
     SIMULATION_START=$SECONDS
     LAST_ANNOUNCE_TIME=$SECONDS
 
+    local deviation elapsed since_last next_in
+    local current_speed_kb chunk_size
+
     while true; do
+        # Randomize upload speed ±30%
+        deviation=$(( (RANDOM % 601) - 300 ))
+        current_speed_kb=$(( UPLOAD_SPEED * (1000 + deviation) / 1000 ))
+        [[ $current_speed_kb -lt 1 ]] && current_speed_kb=1
+        chunk_size=$(( (current_speed_kb * 1024) / updates_per_sec ))
+        [[ $chunk_size -lt 1 ]] && chunk_size=1
+
         UPLOADED=$((UPLOADED + chunk_size))
-        local elapsed=$((SECONDS - SIMULATION_START))
-        local since_last=$((SECONDS - LAST_ANNOUNCE_TIME))
-        local next_in=$((ANNOUNCE_INTERVAL - since_last))
+        elapsed=$((SECONDS - SIMULATION_START))
+        since_last=$((SECONDS - LAST_ANNOUNCE_TIME))
+        next_in=$((ANNOUNCE_INTERVAL - since_last))
         [[ $next_in -lt 0 ]] && next_in=0
 
         show_status "$UPLOADED" "$torrent_size" "$UPLOAD_SPEED" "$elapsed" "$next_in"
 
-        # Time for a regular announce?
+        # Periodic announce while seeding
         if [[ $since_last -ge $ANNOUNCE_INTERVAL ]]; then
-            verbose "Sending regular announce (uploaded: $UPLOADED)"
+            verbose "Seed announce (uploaded=$UPLOADED)"
             result=$(send_announce "")
             LAST_ANNOUNCE_TIME=$SECONDS
             verbose "Announce result: $result"

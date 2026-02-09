@@ -130,7 +130,7 @@ FIXTURES="$BATS_TEST_DIRNAME/fixtures"
 @test "dry-run shows announce mode" {
     run "$SCRIPT" --dry-run --no-color "$FIXTURES/simple.torrent"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Announce"* ]]
+    [[ "$output" == *"Seed"* ]]
     [[ "$output" == *"Ctrl+C"* ]]
 }
 
