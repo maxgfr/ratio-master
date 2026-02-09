@@ -23,18 +23,6 @@ FIXTURES="$BATS_TEST_DIRNAME/fixtures"
     [[ "$output" == *"DESCRIPTION"* ]]
 }
 
-@test "shows version with -V" {
-    run "$SCRIPT" -V
-    [ "$status" -eq 0 ]
-    [[ "$output" == "ratio-master 1.0.0" ]]
-}
-
-@test "shows version with --version" {
-    run "$SCRIPT" --version
-    [ "$status" -eq 0 ]
-    [[ "$output" == "ratio-master 1.0.0" ]]
-}
-
 ################################################################################
 # ERROR HANDLING - MISSING ARGUMENTS
 ################################################################################

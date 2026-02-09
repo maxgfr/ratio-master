@@ -168,7 +168,7 @@ ratio-master/
 ├── ratio-master.sh              # Main script
 ├── test.torrent                 # Sample torrent file
 ├── tests/
-│   ├── ratio-master.bats        # Test suite (39 tests)
+│   ├── ratio-master.bats        # Test suite (37 tests)
 │   └── generate-fixtures.sh     # Generates test torrent files
 ├── .github/
 │   └── workflows/
