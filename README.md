@@ -19,12 +19,22 @@ A torrent ratio tool that sends real HTTP announce requests to BitTorrent tracke
 - Parses real `.torrent` files (single-file and multi-file)
 - Displays torrent metadata (name, size, pieces, tracker, comment)
 - Computes info_hash in pure shell (no Python dependency)
+- Emulates **qBittorrent 4.6.2** (default) or **uTorrent 3.3.2** (`--client` option)
 - Sends real HTTP announces to the tracker (`started`, regular updates, `stopped`)
 - Reports incremental upload values with configurable speed
 - Displays live status: uploaded, ratio, speed, elapsed time, next announce
 - Works on **Linux** and **macOS**
 - Pure shell implementation with minimal dependencies
 - Respects the [NO_COLOR](https://no-color.org/) standard
+
+## Supported Clients
+
+| Client | Version | Flag | Aliases |
+|--------|---------|------|---------|
+| qBittorrent | 4.6.2 | `--client qbittorrent` | `qb` |
+| uTorrent | 3.3.2 | `--client utorrent` | `ut` |
+
+qBittorrent is the default. Client selection is case-insensitive.
 
 ## Installation
 
@@ -69,6 +79,7 @@ ratio-master [OPTIONS] <file.torrent>
 
 | Option | Description | Default |
 |--------|-------------|---------|
+| `-c, --client <name>` | BitTorrent client to emulate (`qbittorrent`, `utorrent`) | `qbittorrent` |
 | `-s, --speed <KB/s>` | Upload speed in KB/s | `512` |
 | `--dry-run` | Show torrent info and info_hash without sending announces | - |
 | `--no-color` | Disable colored output | - |
@@ -85,6 +96,12 @@ ratio-master my-file.torrent
 # Custom speed (1 MB/s)
 ratio-master --speed 1024 my-file.torrent
 
+# Emulate uTorrent instead of qBittorrent (default)
+ratio-master --client utorrent my-file.torrent
+
+# Short aliases work too: qb, ut
+ratio-master -c ut my-file.torrent
+
 # Inspect torrent metadata and info_hash only
 ratio-master --dry-run my-file.torrent
 ```
@@ -99,8 +116,9 @@ ratio-master --dry-run my-file.torrent
   Tracker:       http://tracker.example.com:8080/announce
 
   ANNOUNCE PARAMETERS
+  Client:           qBittorrent 4.6.2
   Speed:            512 KB/s
-  Mode:             Announce (Ctrl+C to stop)
+  Mode:             Seed (Ctrl+C to stop)
 
   STARTING ANNOUNCES
   (Ctrl+C to stop)
@@ -143,7 +161,7 @@ Tips for maintaining a good ratio on private trackers:
 
 1. **Parse torrent file** - Extract tracker URL, torrent name, size, pieces
 2. **Compute info_hash** - Pure shell bencode parser + SHA1 (via `shasum` or `openssl`)
-3. **Generate peer_id** - Random peer ID in the format `-RM0100-<12 hex chars>`
+3. **Generate peer_id** - Client-specific peer ID (e.g. `-qB4620-` for qBittorrent, `-UT3320-` for uTorrent)
 4. **Send `started` announce** - Initial HTTP request with `event=started`
 5. **Increment upload counter** - Simulate upload at specified speed
 6. **Send periodic announces** - Regular updates based on tracker's interval
@@ -175,6 +193,7 @@ The test suite covers:
 - All error cases (missing file, invalid options, bad input)
 - Torrent parsing (single-file, multi-file, minimal, large)
 - All CLI options and shorthands
+- Client selection (`--client`, `-c`, aliases, case-insensitivity, error cases)
 - `format_size` unit conversion with decimal precision
 - `compute_info_hash` computation in pure shell
 - Color mode and NO_COLOR compliance
@@ -186,7 +205,7 @@ ratio-master/
 ├── ratio-master.sh              # Main script
 ├── test.torrent                 # Sample torrent file
 ├── tests/
-│   ├── ratio-master.bats        # Test suite (33 tests)
+│   ├── ratio-master.bats        # Test suite (43 tests)
 │   ├── generate-fixtures.sh     # Generates test torrent files
 │   └── fixtures/                # Test .torrent files
 ├── .github/

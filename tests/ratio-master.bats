@@ -309,6 +309,70 @@ FIXTURES="$BATS_TEST_DIRNAME/fixtures"
 }
 
 ################################################################################
+# CLIENT SELECTION
+################################################################################
+
+@test "defaults to qbittorrent client" {
+    run "$SCRIPT" --dry-run --no-color "$FIXTURES/simple.torrent"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"qBittorrent 4.6.2"* ]]
+}
+
+@test "--client qbittorrent selects qBittorrent" {
+    run "$SCRIPT" --dry-run --no-color --client qbittorrent "$FIXTURES/simple.torrent"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"qBittorrent 4.6.2"* ]]
+}
+
+@test "--client utorrent selects uTorrent" {
+    run "$SCRIPT" --dry-run --no-color --client utorrent "$FIXTURES/simple.torrent"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"uTorrent 3.3.2"* ]]
+}
+
+@test "-c shorthand works" {
+    run "$SCRIPT" --dry-run --no-color -c utorrent "$FIXTURES/simple.torrent"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"uTorrent 3.3.2"* ]]
+}
+
+@test "--client is case-insensitive" {
+    run "$SCRIPT" --dry-run --no-color --client QBITTORRENT "$FIXTURES/simple.torrent"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"qBittorrent 4.6.2"* ]]
+}
+
+@test "--client accepts short alias qb" {
+    run "$SCRIPT" --dry-run --no-color --client qb "$FIXTURES/simple.torrent"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"qBittorrent 4.6.2"* ]]
+}
+
+@test "--client accepts short alias ut" {
+    run "$SCRIPT" --dry-run --no-color --client ut "$FIXTURES/simple.torrent"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"uTorrent 3.3.2"* ]]
+}
+
+@test "--client without value fails" {
+    run "$SCRIPT" --client
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"requires a value"* ]]
+}
+
+@test "--client with unknown client fails" {
+    run "$SCRIPT" --client deluge "$FIXTURES/simple.torrent"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unknown client"* ]]
+}
+
+@test "help text shows --client option" {
+    run "$SCRIPT" -h
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--client"* ]]
+}
+
+################################################################################
 # BANNER
 ################################################################################
 

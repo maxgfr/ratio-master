@@ -32,6 +32,7 @@ DOWNLOADED=0
 SIMULATION_START=0
 DRY_RUN=false
 VERBOSE=false
+CLIENT="qbittorrent"
 
 INFO_HASH=""              # info_hash URL-encoded (%xx%xx...)
 INFO_HASH_HEX=""          # info_hash in hex (for display)
@@ -64,8 +65,6 @@ NC_CMD=""
 
 # Download simulation state
 LEFT=0
-DOWNLOAD_COMPLETE=false
-DOWNLOAD_SPEED_KB=0
 PEER_ID_HEX=""
 
 ################################################################################
@@ -87,6 +86,33 @@ setup_colors() {
     YELLOW=$'\033[33m'
     BLUE=$'\033[34m'
     CYAN=$'\033[36m'
+}
+
+################################################################################
+# CLIENT PROFILES
+################################################################################
+
+get_client_name() {
+    case "$CLIENT" in
+        qbittorrent) echo "qBittorrent 4.6.2" ;;
+        utorrent)    echo "uTorrent 3.3.2" ;;
+    esac
+}
+
+get_client_user_agent() {
+    case "$CLIENT" in
+        qbittorrent) echo "qBittorrent/4.6.2" ;;
+        utorrent)    echo "uTorrent/3320" ;;
+    esac
+}
+
+get_client_reserved_bytes() {
+    case "$CLIENT" in
+        # qBittorrent: DHT + Extension Protocol (no Fast Extensions)
+        qbittorrent) printf '\x00\x00\x00\x00\x00\x10\x00\x04' ;;
+        # uTorrent: DHT + Extension Protocol + Fast Extensions
+        utorrent)    printf '\x00\x00\x00\x00\x00\x10\x00\x05' ;;
+    esac
 }
 
 ################################################################################
@@ -220,6 +246,11 @@ ARGUMENTS
         Torrent file to analyze (required)
 
 OPTIONS
+    -c, --client <name>
+        BitTorrent client to emulate
+        Supported: qbittorrent (qb), utorrent (ut)
+        Default: qbittorrent
+
     -s, --speed <KB/s>
         Upload speed in kilobytes per second
         Default: 512 KB/s
@@ -245,6 +276,9 @@ EXAMPLES
 
     # Announce with custom speed (1 MB/s)
     ratio-master.sh --speed 1024 my-file.torrent
+
+    # Emulate uTorrent instead of qBittorrent
+    ratio-master.sh --client utorrent my-file.torrent
 
     # Display info only
     ratio-master.sh --dry-run my-file.torrent
@@ -513,39 +547,60 @@ compute_info_hash() {
 }
 
 generate_peer_id() {
-    # Emulate uTorrent 3.3.2 peer_id: -UT3320-<\x18><w><10 random bytes>
-    local random_hex
-    random_hex=$(LC_ALL=C head -c 10 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 20)
-
-    # Build full 20-byte peer_id in hex
-    # "-UT3320-" = 2d 55 54 33 33 32 30 2d, \x18 = 18, "w" = 77
-    PEER_ID_HEX="2d5554333332302d1877${random_hex}"
-
-    # URL-encode for tracker
-    PEER_ID="-UT3320-%18w"
-    local i
-    for (( i=0; i<${#random_hex}; i+=2 )); do
-        PEER_ID+="%${random_hex:$i:2}"
-    done
+    case "$CLIENT" in
+        qbittorrent)
+            # qBittorrent 4.6.2 peer_id: -qB4620-<12 random hex chars as ASCII>
+            local rand12
+            rand12=$(LC_ALL=C head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 12)
+            # "-qB4620-" = 2d 71 42 34 36 32 30 2d
+            PEER_ID_HEX="2d7142343632302d"
+            local i ch
+            for (( i=0; i<${#rand12}; i++ )); do
+                ch="${rand12:$i:1}"
+                PEER_ID_HEX+=$(printf '%02x' "'$ch")
+            done
+            PEER_ID="-qB4620-${rand12}"
+            ;;
+        utorrent)
+            # uTorrent 3.3.2 peer_id: -UT3320-<\x18><w><10 random bytes>
+            # "-UT3320-" = 2d 55 54 33 33 32 30 2d, \x18 = 18, "w" = 77
+            local random_hex
+            random_hex=$(LC_ALL=C head -c 10 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 20)
+            PEER_ID_HEX="2d5554333332302d1877${random_hex}"
+            PEER_ID="-UT3320-%18w"
+            local i
+            for (( i=0; i<${#random_hex}; i+=2 )); do
+                PEER_ID+="%${random_hex:$i:2}"
+            done
+            ;;
+    esac
 
     verbose "peer_id (hex): $PEER_ID_HEX"
     verbose "peer_id (url): $PEER_ID"
 }
 
 generate_session_key() {
-    # uTorrent uses 8-char uppercase hex key
-    SESSION_KEY=$(LC_ALL=C head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 8 | tr 'a-f' 'A-F')
+    case "$CLIENT" in
+        qbittorrent)
+            # qBittorrent uses 8-char lowercase hex key
+            SESSION_KEY=$(LC_ALL=C head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 8)
+            ;;
+        utorrent)
+            # uTorrent uses 8-char uppercase hex key
+            SESSION_KEY=$(LC_ALL=C head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 8 | tr 'a-f' 'A-F')
+            ;;
+    esac
     verbose "session key: $SESSION_KEY"
 }
 
 generate_session_port() {
-    # Random port in typical uTorrent range
+    # Random port in typical BT client range
     SESSION_PORT=$(( 10000 + (RANDOM % 55000) ))
     verbose "session port: $SESSION_PORT"
 }
 
 # Round value to nearest multiple of denominator (like real BT clients)
-# uTorrent rounds uploaded to 16KB (0x4000) boundaries
+# BT clients round uploaded to 16KB (0x4000) boundaries
 round_to_boundary() {
     local value=$1
     local boundary=$2
@@ -571,18 +626,17 @@ randomize_speed() {
 create_bt_handshake() {
     local outfile="$1"
     # BT handshake: \x13 + "BitTorrent protocol" + reserved(8) + info_hash(20) + peer_id(20)
-    # Reserved bytes: DHT + Extension Protocol + Fast = typical uTorrent 3.3.2
     {
         printf '\x13BitTorrent protocol'
-        printf '\x00\x00\x00\x00\x00\x10\x00\x05'
+        get_client_reserved_bytes
         # info_hash as raw bytes
         local i
         for (( i=0; i<${#INFO_HASH_HEX}; i+=2 )); do
-            printf "\\x${INFO_HASH_HEX:$i:2}"
+            printf '%b' "\\x${INFO_HASH_HEX:$i:2}"
         done
         # peer_id as raw bytes
         for (( i=0; i<${#PEER_ID_HEX}; i+=2 )); do
-            printf "\\x${PEER_ID_HEX:$i:2}"
+            printf '%b' "\\x${PEER_ID_HEX:$i:2}"
         done
     } > "$outfile"
 }
@@ -596,10 +650,10 @@ create_bt_bitfield() {
     local msg_len=$(( 1 + bitfield_len ))
     {
         # Message length (4 bytes big-endian)
-        printf "\\x$(printf '%02x' $(( (msg_len >> 24) & 0xFF )))"
-        printf "\\x$(printf '%02x' $(( (msg_len >> 16) & 0xFF )))"
-        printf "\\x$(printf '%02x' $(( (msg_len >> 8) & 0xFF )))"
-        printf "\\x$(printf '%02x' $(( msg_len & 0xFF )))"
+        printf '%b' "\\x$(printf '%02x' $(( (msg_len >> 24) & 0xFF )))"
+        printf '%b' "\\x$(printf '%02x' $(( (msg_len >> 16) & 0xFF )))"
+        printf '%b' "\\x$(printf '%02x' $(( (msg_len >> 8) & 0xFF )))"
+        printf '%b' "\\x$(printf '%02x' $(( msg_len & 0xFF )))"
         # Message ID = 5 (bitfield)
         printf '\x05'
         # All pieces present (0xFF bytes)
@@ -612,7 +666,7 @@ create_bt_bitfield() {
         # Last partial byte
         if [[ $remaining_bits -gt 0 ]]; then
             local last_byte=$(( (0xFF << (8 - remaining_bits)) & 0xFF ))
-            printf "\\x$(printf '%02x' "$last_byte")"
+            printf '%b' "\\x$(printf '%02x' "$last_byte")"
         fi
     } >> "$outfile"
 }
@@ -671,7 +725,7 @@ send_announce() {
         return 1
     fi
 
-    # Round uploaded to 16KB boundary (0x4000) like real uTorrent
+    # Round uploaded to 16KB boundary like real BT clients
     local rounded_uploaded
     if [[ $UPLOADED -gt 0 ]]; then
         rounded_uploaded=$(round_to_boundary "$UPLOADED" 16384)
@@ -679,7 +733,7 @@ send_announce() {
         rounded_uploaded=0
     fi
 
-    # Round downloaded to 16KB boundary too (uTorrent does this consistently)
+    # Round downloaded to 16KB boundary
     local rounded_downloaded
     if [[ $DOWNLOADED -gt 0 ]]; then
         rounded_downloaded=$(round_to_boundary "$DOWNLOADED" 16384)
@@ -687,8 +741,7 @@ send_announce() {
         rounded_downloaded=0
     fi
 
-    # Build query — uTorrent 3.3.2 exact parameter order
-    # Template: info_hash&peer_id&port&uploaded&downloaded&left&corrupt=0&key&event&numwant&compact=1&no_peer_id=1
+    # Build query with client-specific parameter order and values
     local url="${TORRENT_TRACKER}"
     if [[ "$url" == *"?"* ]]; then
         url+="&"
@@ -706,16 +759,30 @@ send_announce() {
     if [[ -n "$event" ]]; then
         url+="&event=${event}"
     fi
-    # Vary numwant: more peers wanted during download, fewer when seeding
+
     local numwant
-    if [[ "$LEFT" -gt 0 ]]; then
-        numwant=200
-    else
-        numwant=$((50 + RANDOM % 151))
-    fi
-    url+="&numwant=${numwant}"
-    url+="&compact=1"
-    url+="&no_peer_id=1"
+    case "$CLIENT" in
+        qbittorrent)
+            # qBittorrent always requests 100 peers
+            numwant=100
+            url+="&numwant=${numwant}"
+            url+="&compact=1"
+            url+="&no_peer_id=1"
+            url+="&supportcrypto=1"
+            url+="&redundant=0"
+            ;;
+        utorrent)
+            # uTorrent varies numwant: more during download, fewer when seeding
+            if [[ "$LEFT" -gt 0 ]]; then
+                numwant=200
+            else
+                numwant=$((50 + RANDOM % 151))
+            fi
+            url+="&numwant=${numwant}"
+            url+="&compact=1"
+            url+="&no_peer_id=1"
+            ;;
+    esac
 
     verbose "Announce URL: $url"
 
@@ -726,12 +793,12 @@ send_announce() {
     local tracker_host
     tracker_host=$(echo "$TORRENT_TRACKER" | sed -E 's|https?://([^/]+).*|\1|')
 
-    local http_code
-    # Exact uTorrent 3.3.2 headers: Host, User-Agent, Accept-Encoding (nothing else)
-    # --header "Accept:" removes curl's default Accept: */* header
+    local http_code user_agent
+    user_agent=$(get_client_user_agent)
+    # Client-specific headers; --header "Accept:" removes curl's default Accept: */* header
     http_code=$(curl --silent --max-time 30 --compressed \
         --header "Host: ${tracker_host}" \
-        --header "User-Agent: uTorrent/3320" \
+        --header "User-Agent: ${user_agent}" \
         --header "Accept-Encoding: gzip" \
         --header "Accept:" \
         --output "$tmpfile" --write-out '%{http_code}' "$url" 2>/dev/null) || {
@@ -813,6 +880,7 @@ display_torrent_info() {
 
     echo ""
     echo "${BOLD}  ANNOUNCE PARAMETERS${RESET}"
+    echo "  ${DIM}Client:${RESET}           $(get_client_name)"
     echo "  ${DIM}Speed:${RESET}            ${UPLOAD_SPEED} KB/s"
     echo "  ${DIM}Mode:${RESET}             Seed (Ctrl+C to stop)"
     if [[ -n "$NC_CMD" ]]; then
@@ -1063,6 +1131,19 @@ parse_arguments() {
             -V|--version)
                 show_version
                 exit 0
+                ;;
+            -c|--client)
+                if [[ -z "${2:-}" ]]; then
+                    error "Option --client requires a value"
+                fi
+                local client_lower
+                client_lower=$(echo "$2" | tr '[:upper:]' '[:lower:]')
+                case "$client_lower" in
+                    qbittorrent|qb) CLIENT="qbittorrent" ;;
+                    utorrent|ut)    CLIENT="utorrent" ;;
+                    *) error "Unknown client: $2 (supported: qbittorrent, utorrent)" ;;
+                esac
+                shift 2
                 ;;
             -s|--speed)
                 if [[ -z "${2:-}" ]]; then
