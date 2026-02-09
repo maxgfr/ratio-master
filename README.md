@@ -1,7 +1,6 @@
 # Ratio Master
 
-[![CI](https://github.com/maxgolfier/ratio-master/actions/workflows/ci.yml/badge.svg)](https://github.com/maxgolfier/ratio-master/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/maxgfr/ratio-master/actions/workflows/ci.yml/badge.svg)](https://github.com/maxgfr/ratio-master/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A local torrent upload simulator for educational purposes. Parses `.torrent` files and simulates upload progress to help understand how BitTorrent ratio tracking works.
 
@@ -27,6 +26,18 @@ A local torrent upload simulator for educational purposes. Parses `.torrent` fil
 
 ## Installation
 
+### Via Homebrew (recommended)
+
+```bash
+# Install from tap
+brew install maxgfr/tap/ratio-master
+
+# Run
+ratio-master my-file.torrent
+```
+
+### Manual installation
+
 ```bash
 # Clone the repository
 git clone https://github.com/maxgolfier/ratio-master.git
@@ -34,12 +45,8 @@ cd ratio-master
 
 # Make the script executable
 chmod +x ratio-master.sh
-```
 
-Optionally, add it to your PATH:
-
-```bash
-# Symlink to a directory in your PATH
+# Optionally, add it to your PATH
 ln -s "$(pwd)/ratio-master.sh" /usr/local/bin/ratio-master
 ```
 

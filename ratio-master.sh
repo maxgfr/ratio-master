@@ -77,7 +77,9 @@ setup_colors() {
 
 cleanup() {
     # Restaurer le curseur si terminal interactif
-    [[ -t 1 ]] && printf '\033[?25h' 2>/dev/null || :
+    if [[ -t 1 ]]; then
+        printf '\033[?25h' 2>/dev/null || :
+    fi
 }
 
 trap cleanup EXIT INT TERM HUP
