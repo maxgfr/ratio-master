@@ -40,7 +40,7 @@ ratio-master my-file.torrent
 
 ```bash
 # Clone the repository
-git clone https://github.com/maxgolfier/ratio-master.git
+git clone https://github.com/maxgfr/ratio-master.git
 cd ratio-master
 
 # Make the script executable
