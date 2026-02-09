@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Lint ratio-master.sh
+        run: shellcheck ratio-master.sh
+
+      - name: Lint test helper scripts
+        run: shellcheck tests/generate-fixtures.sh
+
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats-core (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+
+      - name: Install bats-core (macOS)
+        if: runner.os == 'macOS'
+        run: brew install bats-core
+
+      - name: Ensure python3 is available
+        run: python3 --version
+
+      - name: Generate test fixtures
+        run: bash tests/generate-fixtures.sh
+
+      - name: Run tests
+        run: bats tests/ratio-master.bats
+
+  dry-run:
+    name: Smoke test
+    runs-on: ubuntu-latest
+    needs: [shellcheck, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate test torrent
+        run: bash tests/generate-fixtures.sh
+
+      - name: Run dry-run simulation
+        run: |
+          chmod +x ratio-master.sh
+          ./ratio-master.sh --dry-run --no-color tests/fixtures/simple.torrent
+          ./ratio-master.sh --dry-run --no-color --size 100 --speed 2048 tests/fixtures/large.torrent
