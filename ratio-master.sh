@@ -55,25 +55,20 @@ TORRENT_COMMENT=""
 ################################################################################
 
 setup_colors() {
+    # Si couleurs desactivees, tout reste vide (deja initialise)
     if [[ "$NO_COLOR" == true ]] || [[ ! -t 1 ]] || [[ -n "${_NO_COLOR_ENV:-}" ]]; then
-        BOLD=""
-        DIM=""
-        RESET=""
-        RED=""
-        GREEN=""
-        YELLOW=""
-        BLUE=""
-        CYAN=""
-    else
-        BOLD=$'\033[1m'
-        DIM=$'\033[2m'
-        RESET=$'\033[0m'
-        RED=$'\033[31m'
-        GREEN=$'\033[32m'
-        YELLOW=$'\033[33m'
-        BLUE=$'\033[34m'
-        CYAN=$'\033[36m'
+        return
     fi
+
+    # Activer les couleurs
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    RESET=$'\033[0m'
+    RED=$'\033[31m'
+    GREEN=$'\033[32m'
+    YELLOW=$'\033[33m'
+    BLUE=$'\033[34m'
+    CYAN=$'\033[36m'
 }
 
 ################################################################################
@@ -81,10 +76,8 @@ setup_colors() {
 ################################################################################
 
 cleanup() {
-    # Restaurer le curseur uniquement si le terminal le supporte
-    if [[ -t 1 ]]; then
-        printf '\033[?25h' 2>/dev/null || true
-    fi
+    # Restaurer le curseur si terminal interactif
+    [[ -t 1 ]] && printf '\033[?25h' 2>/dev/null || :
 }
 
 trap cleanup EXIT INT TERM HUP
@@ -233,128 +226,80 @@ EOF
 # PARSING BENCODE (FORMAT TORRENT)
 ################################################################################
 
-# Parse via python3 (robuste, gere le binaire)
-parse_torrent_python() {
+# Parsing bencode avec outils POSIX uniquement (100% bash)
+parse_torrent_bash() {
     local torrent_file="$1"
+    local content name="" size="" piece_length="" tracker="" comment=""
 
-    python3 -c "
-import sys
+    # Lire le contenu brut en tant que texte binaire
+    content=$(LC_ALL=C cat "$torrent_file" 2>/dev/null)
 
-def decode_bencode(data, pos=0):
-    if pos >= len(data):
-        return None, pos
-    ch = chr(data[pos]) if isinstance(data[pos], int) else data[pos]
-    if ch == 'i':
-        end = data.index(b'e', pos)
-        return int(data[pos+1:end]), end + 1
-    elif ch == 'l':
-        result = []
-        pos += 1
-        while chr(data[pos]) != 'e':
-            val, pos = decode_bencode(data, pos)
-            result.append(val)
-        return result, pos + 1
-    elif ch == 'd':
-        result = {}
-        pos += 1
-        while chr(data[pos]) != 'e':
-            key, pos = decode_bencode(data, pos)
-            if isinstance(key, bytes):
-                key = key.decode('utf-8', errors='replace')
-            val, pos = decode_bencode(data, pos)
-            result[key] = val
-        return result, pos + 1
-    elif ch.isdigit():
-        colon = data.index(b':', pos)
-        length = int(data[pos:colon])
-        start = colon + 1
-        return data[start:start+length], start + length
-    else:
-        return None, pos + 1
-
-with open(sys.argv[1], 'rb') as f:
-    data = f.read()
-
-torrent, _ = decode_bencode(data)
-if not isinstance(torrent, dict):
-    sys.exit(1)
-
-info = torrent.get('info', {})
-
-name = info.get('name', b'')
-if isinstance(name, bytes):
-    name = name.decode('utf-8', errors='replace')
-print('NAME=' + name)
-
-length = info.get('length', 0)
-if length:
-    print('SIZE=' + str(length))
-else:
-    files = info.get('files', [])
-    total = sum(f.get('length', 0) for f in files if isinstance(f, dict))
-    if total > 0:
-        print('SIZE=' + str(total))
-    else:
-        print('SIZE=0')
-
-piece_length = info.get('piece length', 262144)
-print('PIECE_LENGTH=' + str(piece_length))
-
-announce = torrent.get('announce', b'')
-if isinstance(announce, bytes):
-    announce = announce.decode('utf-8', errors='replace')
-print('TRACKER=' + announce)
-
-comment = torrent.get('comment', b'')
-if isinstance(comment, bytes):
-    comment = comment.decode('utf-8', errors='replace')
-print('COMMENT=' + comment)
-" "$torrent_file" 2>/dev/null
-}
-
-# Fallback: parsing basique avec outils POSIX
-parse_torrent_fallback() {
-    local torrent_file="$1"
-
-    # Extraire les chaines lisibles du fichier binaire
-    local content
-    content=$(LC_ALL=C strings "$torrent_file" | tr -d '\n')
-
-    # Nom du torrent
-    local name=""
-    name=$(echo "$content" | sed -E 's/.*[0-9]+:name([0-9]+):/\1:/' | sed -E 's/^([0-9]+):(.*)/\2/' | cut -c1-100 | sed -E 's/[0-9]+:.*//')
-    if [[ -z "$name" ]]; then
-        name=$(basename "$torrent_file" .torrent)
-    fi
-    echo "NAME=${name}"
-
-    # Taille totale (premier 'lengthi...e' trouve)
-    local size=""
-    size=$(echo "$content" | sed -E 's/.*lengthi([0-9]+)e.*/\1/' | head -1)
-    if [[ -n "$size" && "$size" != "$content" ]]; then
-        echo "SIZE=${size}"
+    # Nom du torrent - chercher "4:name" suivi d'une longueur et du nom
+    if [[ "$content" =~ 4:name([0-9]+): ]]; then
+        local name_len="${BASH_REMATCH[1]}"
+        local after_match="${content#*4:name"${name_len}":}"
+        name="${after_match:0:$name_len}"
     else
-        echo "SIZE=0"
+        # Fallback: utiliser le nom du fichier
+        name="${torrent_file##*/}"
+        name="${name%.torrent}"
+    fi
+
+    # Taille totale - deux cas :
+    # 1. Fichier simple : "6:lengthi<N>e" dans le dict info
+    # 2. Multi-fichiers : "5:filesl" avec plusieurs "6:lengthi<N>e"
+    if [[ "$content" =~ 5:filesl ]]; then
+        # Multi-fichiers : extraire la section "files" et additionner
+        local files_section="${content#*5:filesl}"
+
+        # Arreter a la fermeture de la liste files
+        if [[ "$files_section" =~ (.*[ee])4:name ]]; then
+            files_section="${BASH_REMATCH[1]}"
+        fi
+
+        # Extraire tous les "lengthi<nombre>e"
+        local total=0
+        while [[ "$files_section" =~ lengthi([0-9]+)e ]]; do
+            total=$((total + BASH_REMATCH[1]))
+            files_section="${files_section#*lengthi"${BASH_REMATCH[1]}"e}"
+        done
+
+        if [[ $total -gt 0 ]]; then
+            size="$total"
+        fi
+    else
+        # Fichier simple
+        if [[ "$content" =~ 6:lengthi([0-9]+)e ]]; then
+            size="${BASH_REMATCH[1]}"
+        fi
     fi
 
     # Piece length
-    local piece_length=""
-    piece_length=$(echo "$content" | sed -E 's/.*piece lengthi([0-9]+)e.*/\1/' | head -1)
-    if [[ -n "$piece_length" && "$piece_length" != "$content" ]]; then
-        echo "PIECE_LENGTH=${piece_length}"
-    else
-        echo "PIECE_LENGTH=262144"
+    if [[ "$content" =~ piece\ lengthi([0-9]+)e ]]; then
+        piece_length="${BASH_REMATCH[1]}"
     fi
 
     # Tracker
-    local tracker=""
-    tracker=$(echo "$content" | sed -E 's/.*announce([0-9]+):(http[^ ]*).*/\2/' | head -1)
-    if [[ "$tracker" == "$content" ]]; then
-        tracker=""
+    if [[ "$content" =~ announce([0-9]+): ]]; then
+        local tracker_len="${BASH_REMATCH[1]}"
+        local after_announce="${content#*announce"${tracker_len}":}"
+        tracker="${after_announce:0:$tracker_len}"
     fi
-    echo "TRACKER=${tracker}"
 
-    echo "COMMENT="
+    # Commentaire
+    if [[ "$content" =~ comment([0-9]+): ]]; then
+        local comment_len="${BASH_REMATCH[1]}"
+        local after_comment="${content#*comment"${comment_len}":}"
+        comment="${after_comment:0:$comment_len}"
+    fi
+
+    # Output en une seule fois (plus rapide)
+    printf 'NAME=%s\nSIZE=%s\nPIECE_LENGTH=%s\nTRACKER=%s\nCOMMENT=%s\n' \
+        "$name" \
+        "${size:-0}" \
+        "${piece_length:-262144}" \
+        "$tracker" \
+        "$comment"
 }
 
 # Parse le fichier torrent
@@ -378,31 +323,34 @@ parse_torrent() {
         error "Le fichier ne semble pas etre un fichier torrent valide"
     fi
 
-    # Parser avec python3 si disponible, sinon fallback
-    local parsed=""
-    if command -v python3 &>/dev/null; then
-        verbose "Utilisation de python3 pour le parsing bencode"
-        parsed=$(parse_torrent_python "$torrent_file") || parsed=""
-    fi
+    # Parser avec bash pur uniquement
+    verbose "Parsing bencode avec bash pur"
+    local parsed
+    parsed=$(parse_torrent_bash "$torrent_file")
 
-    if [[ -z "$parsed" ]]; then
-        verbose "Fallback: parsing basique avec outils POSIX"
-        parsed=$(parse_torrent_fallback "$torrent_file")
-    fi
-
-    # Extraire les valeurs
-    TORRENT_NAME=$(echo "$parsed" | sed -n 's/^NAME=//p')
-    TORRENT_SIZE=$(echo "$parsed" | sed -n 's/^SIZE=//p')
-    TORRENT_PIECE_LENGTH=$(echo "$parsed" | sed -n 's/^PIECE_LENGTH=//p')
-    TORRENT_TRACKER=$(echo "$parsed" | sed -n 's/^TRACKER=//p')
-    TORRENT_COMMENT=$(echo "$parsed" | sed -n 's/^COMMENT=//p')
+    # Extraire les valeurs via parameter expansion (0 sous-shell)
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            NAME=*)         TORRENT_NAME="${line#NAME=}" ;;
+            SIZE=*)         TORRENT_SIZE="${line#SIZE=}" ;;
+            PIECE_LENGTH=*) TORRENT_PIECE_LENGTH="${line#PIECE_LENGTH=}" ;;
+            TRACKER=*)      TORRENT_TRACKER="${line#TRACKER=}" ;;
+            COMMENT=*)      TORRENT_COMMENT="${line#COMMENT=}" ;;
+        esac
+    done <<< "$parsed"
 
     # Valeurs par defaut si vides
-    [[ -z "$TORRENT_NAME" ]] && TORRENT_NAME=$(basename "$torrent_file" .torrent)
-    [[ -z "$TORRENT_PIECE_LENGTH" ]] && TORRENT_PIECE_LENGTH=262144
+    if [[ -z "$TORRENT_NAME" ]]; then
+        TORRENT_NAME="${torrent_file##*/}"
+        TORRENT_NAME="${TORRENT_NAME%.torrent}"
+    fi
+    if [[ -z "$TORRENT_PIECE_LENGTH" ]]; then
+        TORRENT_PIECE_LENGTH=262144
+    fi
 
-    # Valider que la taille est numerique
-    if [[ "$TORRENT_SIZE" =~ ^[0-9]+$ && "$TORRENT_SIZE" != "0" ]]; then
+    # Calculer le nombre de pieces
+    if [[ "$TORRENT_SIZE" =~ ^[0-9]+$ && "$TORRENT_SIZE" -gt 0 ]]; then
         TORRENT_PIECES=$(( (TORRENT_SIZE + TORRENT_PIECE_LENGTH - 1) / TORRENT_PIECE_LENGTH ))
     else
         TORRENT_SIZE="0"

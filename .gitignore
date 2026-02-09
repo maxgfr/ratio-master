@@ -8,6 +8,3 @@ Thumbs.db
 *~
 .vscode/
 .idea/
-
-# Test fixtures (generated)
-tests/fixtures/

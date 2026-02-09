@@ -19,7 +19,7 @@ jobs:
       - name: Lint ratio-master.sh
         run: shellcheck ratio-master.sh
 
-      - name: Lint test helper scripts
+      - name: Lint generate-fixtures.sh
         run: shellcheck tests/generate-fixtures.sh
 
   test:
@@ -41,12 +41,6 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install bats-core
 
-      - name: Ensure python3 is available
-        run: python3 --version
-
-      - name: Generate test fixtures
-        run: bash tests/generate-fixtures.sh
-
       - name: Run tests
         run: bats tests/ratio-master.bats
 
@@ -56,9 +50,6 @@ jobs:
     needs: [shellcheck, test]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Generate test torrent
-        run: bash tests/generate-fixtures.sh
 
       - name: Run dry-run simulation
         run: |

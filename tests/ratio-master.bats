@@ -6,13 +6,6 @@
 SCRIPT="$BATS_TEST_DIRNAME/../ratio-master.sh"
 FIXTURES="$BATS_TEST_DIRNAME/fixtures"
 
-setup() {
-    # Ensure fixtures exist
-    if [[ ! -f "$FIXTURES/simple.torrent" ]]; then
-        bash "$BATS_TEST_DIRNAME/generate-fixtures.sh"
-    fi
-}
-
 ################################################################################
 # HELP & VERSION
 ################################################################################

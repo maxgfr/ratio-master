@@ -22,7 +22,7 @@ A local torrent upload simulator for educational purposes. Parses `.torrent` fil
 - Simulates upload with a live progress bar and ETA
 - Calculates the resulting ratio
 - Works on **Linux** and **macOS**
-- Zero dependencies beyond `bash` and `awk` (uses `python3` when available for robust parsing)
+- Zero dependencies beyond `bash` and `awk` (100% pure bash implementation)
 - Respects the [NO_COLOR](https://no-color.org/) standard
 
 ## Installation
@@ -47,7 +47,6 @@ ln -s "$(pwd)/ratio-master.sh" /usr/local/bin/ratio-master
 
 - **bash** 4.0+
 - **awk** (included on all Unix systems)
-- **python3** (optional, for robust bencode parsing)
 
 ## Usage
 
@@ -139,7 +138,7 @@ brew install bats-core
 # Ubuntu/Debian
 sudo apt-get install bats
 
-# Generate test fixtures
+# Regenerate test fixtures (optional, already committed)
 bash tests/generate-fixtures.sh
 
 # Run tests
