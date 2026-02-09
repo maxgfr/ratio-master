@@ -96,24 +96,24 @@ ratio-master.sh [OPTIONS] <file.torrent>
 ### Example output
 
 ```
-  FICHIER TORRENT
-  Nom:           Ratio-Master-Test-File
-  Taille:        100 Mo
-  Pieces:        400 (256 Ko/piece)
+  TORRENT FILE
+  Name:          Ratio-Master-Test-File
+  Size:          100 MB
+  Pieces:        400 (256 KB/piece)
   Tracker:       http://tracker.example.com:8080/announce
 
-  PARAMETRES DE SIMULATION
-  Upload simule:   5 Mo
-  Vitesse:         512 KB/s
-  Duree estimee:   10s
+  SIMULATION PARAMETERS
+  Simulated upload: 5 MB
+  Speed:            512 KB/s
+  Estimated time:   10s
 
-  [████████████████████████████████████████] 100% | 5 Mo / 5 Mo | 512 KB/s | ETA 0s
+  [████████████████████████████████████████] 100% | 5 MB / 5 MB | 512 KB/s | ETA 0s
 
-  RESULTATS
-  Uploade:       5 Mo
-  Taille torrent: 100 Mo
-  Ratio simule:  0.05
-  Statut:        Ratio inferieur a 1.0
+  RESULTS
+  Uploaded:      5 MB
+  Torrent size:  100 MB
+  Simulated ratio: 0.05
+  Status:        Ratio below 1.0
 ```
 
 ## Understanding Ratio

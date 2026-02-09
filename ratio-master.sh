@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 
 ################################################################################
-# ratio-master - Simulateur d'upload torrent pedagogique
+# ratio-master - Educational torrent upload simulator
 #
-# Usage: ratio-master.sh [OPTIONS] <fichier.torrent>
+# Usage: ratio-master.sh [OPTIONS] <file.torrent>
 #
-# Simule localement une progression d'upload pour comprendre le ratio
-# sur les trackers BitTorrent. Aucune connexion reseau reelle.
+# Simulates upload progress locally to understand ratio
+# on BitTorrent trackers. No actual network connection.
 #
-# Licence: MIT
+# License: MIT
 ################################################################################
 
 set -euo pipefail
@@ -16,15 +16,15 @@ set -euo pipefail
 readonly VERSION="1.0.1"
 
 ################################################################################
-# CONFIGURATION PAR DEFAUT
+# DEFAULT CONFIGURATION
 ################################################################################
 
-readonly DEFAULT_UPLOAD_SIZE=$((5 * 1024 * 1024))  # 5 Mo en octets
+readonly DEFAULT_UPLOAD_SIZE=$((5 * 1024 * 1024))  # 5 MB in bytes
 readonly DEFAULT_SPEED=512                          # 512 KB/s
 readonly PROGRESS_BAR_WIDTH=40
 
 ################################################################################
-# VARIABLES GLOBALES
+# GLOBAL VARIABLES
 ################################################################################
 
 TORRENT_FILE=""
@@ -34,15 +34,15 @@ SIMULATION_TIME=0
 DRY_RUN=false
 VERBOSE=false
 
-# Respecter le standard NO_COLOR (https://no-color.org/)
-# Capturer l'env var AVANT de la remplacer par notre variable interne
+# Respect the NO_COLOR standard (https://no-color.org/)
+# Capture env var BEFORE replacing it with our internal variable
 _NO_COLOR_ENV="${NO_COLOR+set}"
 NO_COLOR=false
 
-# Variables couleur (initialisees vides pour set -u)
+# Color variables (initialized empty for set -u)
 BOLD="" DIM="" RESET="" RED="" GREEN="" YELLOW="" BLUE="" CYAN=""
 
-# Informations torrent (remplies par parse_torrent)
+# Torrent information (filled by parse_torrent)
 TORRENT_NAME=""
 TORRENT_SIZE=""
 TORRENT_PIECES=""
@@ -51,16 +51,16 @@ TORRENT_TRACKER=""
 TORRENT_COMMENT=""
 
 ################################################################################
-# COULEURS
+# COLORS
 ################################################################################
 
 setup_colors() {
-    # Si couleurs desactivees, tout reste vide (deja initialise)
+    # If colors disabled, everything stays empty (already initialized)
     if [[ "$NO_COLOR" == true ]] || [[ ! -t 1 ]] || [[ -n "${_NO_COLOR_ENV:-}" ]]; then
         return
     fi
 
-    # Activer les couleurs
+    # Enable colors
     BOLD=$'\033[1m'
     DIM=$'\033[2m'
     RESET=$'\033[0m'
@@ -72,11 +72,11 @@ setup_colors() {
 }
 
 ################################################################################
-# GESTION DES SIGNAUX
+# SIGNAL HANDLING
 ################################################################################
 
 cleanup() {
-    # Restaurer le curseur si terminal interactif
+    # Restore cursor if interactive terminal
     if [[ -t 1 ]]; then
         printf '\033[?25h' 2>/dev/null || :
     fi
@@ -85,12 +85,12 @@ cleanup() {
 trap cleanup EXIT INT TERM HUP
 
 ################################################################################
-# UTILITAIRES
+# UTILITIES
 ################################################################################
 
 error() {
     setup_colors
-    echo "${RED}ERREUR:${RESET} $*" >&2
+    echo "${RED}ERROR:${RESET} $*" >&2
     exit 1
 }
 
@@ -100,17 +100,17 @@ verbose() {
     fi
 }
 
-# Conversion d'unites avec precision decimale
+# Unit conversion with decimal precision
 format_size() {
     local bytes=$1
 
     if [[ $bytes -lt 1024 ]]; then
-        echo "${bytes} o"
+        echo "${bytes} B"
         return
     fi
 
     awk -v b="$bytes" 'BEGIN {
-        split("Ko Mo Go To", units, " ")
+        split("KB MB GB TB", units, " ")
         val = b
         idx = 0
         while (val >= 1024 && idx < 3) {
@@ -125,7 +125,7 @@ format_size() {
     }'
 }
 
-# Conversion secondes -> format lisible
+# Seconds to readable format conversion
 format_duration() {
     local seconds=$1
 
@@ -143,7 +143,7 @@ format_duration() {
 }
 
 ################################################################################
-# AIDE ET VERSION
+# HELP AND VERSION
 ################################################################################
 
 show_version() {
@@ -153,113 +153,113 @@ show_version() {
 show_help() {
     cat << 'EOF'
 SYNOPSIS
-    ratio-master.sh [OPTIONS] <fichier.torrent>
+    ratio-master.sh [OPTIONS] <file.torrent>
 
 DESCRIPTION
-    Simule localement une progression d'upload torrent pour comprendre
-    le fonctionnement du ratio sur les trackers BitTorrent.
+    Simulates torrent upload progress locally to understand
+    how ratio tracking works on BitTorrent trackers.
 
-    Ce script n'effectue AUCUNE connexion reseau reelle et ne communique
-    avec aucun tracker. C'est une simulation pedagogique uniquement.
+    This script performs NO actual network connection and does not
+    communicate with any tracker. It's purely educational.
 
 ARGUMENTS
-    <fichier.torrent>
-        Fichier torrent a analyser (obligatoire)
+    <file.torrent>
+        Torrent file to analyze (required)
 
 OPTIONS
     -s, --speed <KB/s>
-        Vitesse d'upload simulee en kilo-octets par seconde
-        Par defaut: 512 KB/s
+        Simulated upload speed in kilobytes per second
+        Default: 512 KB/s
 
-    -S, --size <Mo>
-        Taille d'upload a simuler en mega-octets
-        Par defaut: 5 Mo
+    -S, --size <MB>
+        Amount of upload to simulate in megabytes
+        Default: 5 MB
 
-    -t, --time <secondes>
-        Duree de la simulation en secondes
-        La vitesse est calculee automatiquement
+    -t, --time <seconds>
+        Simulation duration in seconds
+        Speed is automatically calculated
 
     --dry-run
-        Affiche les informations sans lancer la simulation
+        Display information without running the simulation
 
     --no-color
-        Desactive les couleurs dans la sortie
+        Disable colored output
 
     -v, --verbose
-        Mode verbose pour le debogage
+        Enable verbose mode for debugging
 
     -V, --version
-        Affiche la version
+        Display version
 
     -h, --help
-        Affiche cette aide
+        Display this help
 
-EXEMPLES
-    # Simulation avec parametres par defaut (512 KB/s, 5 Mo)
-    ratio-master.sh mon-fichier.torrent
+EXAMPLES
+    # Simulation with default parameters (512 KB/s, 5 MB)
+    ratio-master.sh my-file.torrent
 
-    # Simulation avec vitesse personnalisee (1 MB/s)
-    ratio-master.sh --speed 1024 mon-fichier.torrent
+    # Simulation with custom speed (1 MB/s)
+    ratio-master.sh --speed 1024 my-file.torrent
 
-    # Simulation de 50 Mo d'upload
-    ratio-master.sh --size 50 mon-fichier.torrent
+    # Simulate uploading 50 MB
+    ratio-master.sh --size 50 my-file.torrent
 
-    # Simulation sur 30 secondes
-    ratio-master.sh --time 30 mon-fichier.torrent
+    # 30-second simulation
+    ratio-master.sh --time 30 my-file.torrent
 
-    # Affichage des infos seulement
-    ratio-master.sh --dry-run mon-fichier.torrent
+    # Display info only
+    ratio-master.sh --dry-run my-file.torrent
 
-CALCUL DU RATIO
-    Ratio = Uploade / Telecharge
-    - Ratio < 1.0  : Tu dois encore uploader
-    - Ratio = 1.0  : Tu as donne autant que recu
-    - Ratio > 1.0  : Tu es un bon membre de la communaute !
+RATIO CALCULATION
+    Ratio = Uploaded / Downloaded
+    - Ratio < 1.0  : You still need to upload
+    - Ratio = 1.0  : You've given back as much as you received
+    - Ratio > 1.0  : You're a good community member!
 
 NOTE
-    Ce script est purement pedagogique. Pour ameliorer votre ratio
-    reel sur un tracker, laissez vos torrents en seed apres le
-    telechargement.
+    This script is purely educational. To improve your actual
+    ratio on a tracker, leave your torrents seeding after
+    downloading.
 
 EOF
 }
 
 ################################################################################
-# PARSING BENCODE (FORMAT TORRENT)
+# BENCODE PARSING (TORRENT FORMAT)
 ################################################################################
 
-# Parsing bencode avec outils POSIX uniquement (100% bash)
+# Bencode parsing with POSIX tools only (100% bash)
 parse_torrent_bash() {
     local torrent_file="$1"
     local content name="" size="" piece_length="" tracker="" comment=""
 
-    # Lire le contenu brut en tant que texte binaire
+    # Read raw content as binary text
     content=$(LC_ALL=C cat "$torrent_file" 2>/dev/null)
 
-    # Nom du torrent - chercher "4:name" suivi d'une longueur et du nom
+    # Torrent name - search for "4:name" followed by length and name
     if [[ "$content" =~ 4:name([0-9]+): ]]; then
         local name_len="${BASH_REMATCH[1]}"
         local after_match="${content#*4:name"${name_len}":}"
         name="${after_match:0:$name_len}"
     else
-        # Fallback: utiliser le nom du fichier
+        # Fallback: use the filename
         name="${torrent_file##*/}"
         name="${name%.torrent}"
     fi
 
-    # Taille totale - deux cas :
-    # 1. Fichier simple : "6:lengthi<N>e" dans le dict info
-    # 2. Multi-fichiers : "5:filesl" avec plusieurs "6:lengthi<N>e"
+    # Total size - two cases:
+    # 1. Single file: "6:lengthi<N>e" in the info dict
+    # 2. Multi-file: "5:filesl" with multiple "6:lengthi<N>e"
     if [[ "$content" =~ 5:filesl ]]; then
-        # Multi-fichiers : extraire la section "files" et additionner
+        # Multi-file: extract "files" section and sum
         local files_section="${content#*5:filesl}"
 
-        # Arreter a la fermeture de la liste files
+        # Stop at closing of files list
         if [[ "$files_section" =~ (.*[ee])4:name ]]; then
             files_section="${BASH_REMATCH[1]}"
         fi
 
-        # Extraire tous les "lengthi<nombre>e"
+        # Extract all "lengthi<number>e"
         local total=0
         while [[ "$files_section" =~ lengthi([0-9]+)e ]]; do
             total=$((total + BASH_REMATCH[1]))
@@ -270,7 +270,7 @@ parse_torrent_bash() {
             size="$total"
         fi
     else
-        # Fichier simple
+        # Single file
         if [[ "$content" =~ 6:lengthi([0-9]+)e ]]; then
             size="${BASH_REMATCH[1]}"
         fi
@@ -288,14 +288,14 @@ parse_torrent_bash() {
         tracker="${after_announce:0:$tracker_len}"
     fi
 
-    # Commentaire
+    # Comment
     if [[ "$content" =~ comment([0-9]+): ]]; then
         local comment_len="${BASH_REMATCH[1]}"
         local after_comment="${content#*comment"${comment_len}":}"
         comment="${after_comment:0:$comment_len}"
     fi
 
-    # Output en une seule fois (plus rapide)
+    # Output all at once (faster)
     printf 'NAME=%s\nSIZE=%s\nPIECE_LENGTH=%s\nTRACKER=%s\nCOMMENT=%s\n' \
         "$name" \
         "${size:-0}" \
@@ -304,33 +304,33 @@ parse_torrent_bash() {
         "$comment"
 }
 
-# Parse le fichier torrent
+# Parse the torrent file
 parse_torrent() {
     local torrent_file="$1"
 
-    verbose "Parsing du fichier torrent: $torrent_file"
+    verbose "Parsing torrent file: $torrent_file"
 
     if [[ ! -f "$torrent_file" ]]; then
-        error "Le fichier torrent n'existe pas: $torrent_file"
+        error "Torrent file does not exist: $torrent_file"
     fi
 
     if [[ ! -r "$torrent_file" ]]; then
-        error "Le fichier torrent n'est pas lisible: $torrent_file"
+        error "Torrent file is not readable: $torrent_file"
     fi
 
-    # Verifier la signature bencode (doit commencer par 'd')
+    # Verify bencode signature (must start with 'd')
     local first_byte
     first_byte=$(LC_ALL=C head -c1 "$torrent_file")
     if [[ "$first_byte" != "d" ]]; then
-        error "Le fichier ne semble pas etre un fichier torrent valide"
+        error "File does not appear to be a valid torrent file"
     fi
 
-    # Parser avec bash pur uniquement
-    verbose "Parsing bencode avec bash pur"
+    # Parse with pure bash only
+    verbose "Parsing bencode with pure bash"
     local parsed
     parsed=$(parse_torrent_bash "$torrent_file")
 
-    # Extraire les valeurs via parameter expansion (0 sous-shell)
+    # Extract values via parameter expansion (0 subshell)
     local line
     while IFS= read -r line; do
         case "$line" in
@@ -342,7 +342,7 @@ parse_torrent() {
         esac
     done <<< "$parsed"
 
-    # Valeurs par defaut si vides
+    # Default values if empty
     if [[ -z "$TORRENT_NAME" ]]; then
         TORRENT_NAME="${torrent_file##*/}"
         TORRENT_NAME="${TORRENT_NAME%.torrent}"
@@ -351,7 +351,7 @@ parse_torrent() {
         TORRENT_PIECE_LENGTH=262144
     fi
 
-    # Calculer le nombre de pieces
+    # Calculate number of pieces
     if [[ "$TORRENT_SIZE" =~ ^[0-9]+$ && "$TORRENT_SIZE" -gt 0 ]]; then
         TORRENT_PIECES=$(( (TORRENT_SIZE + TORRENT_PIECE_LENGTH - 1) / TORRENT_PIECE_LENGTH ))
     else
@@ -359,14 +359,14 @@ parse_torrent() {
         TORRENT_PIECES="?"
     fi
 
-    verbose "Nom: $TORRENT_NAME"
-    verbose "Taille: $TORRENT_SIZE octets"
+    verbose "Name: $TORRENT_NAME"
+    verbose "Size: $TORRENT_SIZE bytes"
     verbose "Pieces: $TORRENT_PIECES"
     verbose "Tracker: $TORRENT_TRACKER"
 }
 
 ################################################################################
-# AFFICHAGE DES INFORMATIONS
+# INFORMATION DISPLAY
 ################################################################################
 
 display_torrent_info() {
@@ -378,14 +378,14 @@ display_torrent_info() {
     echo " |_| \\_\\__,_|\\__|_|\\___/    |_|  |_|\\__,_|___/\\__\\___|_|   "
     echo "${RESET}"
     echo ""
-    echo "${BOLD}  FICHIER TORRENT${RESET}"
-    echo "  ${DIM}Nom:${RESET}           ${TORRENT_NAME}"
+    echo "${BOLD}  TORRENT FILE${RESET}"
+    echo "  ${DIM}Name:${RESET}          ${TORRENT_NAME}"
 
     if [[ "$TORRENT_SIZE" != "0" ]]; then
-        echo "  ${DIM}Taille:${RESET}        $(format_size "$TORRENT_SIZE")"
+        echo "  ${DIM}Size:${RESET}          $(format_size "$TORRENT_SIZE")"
         echo "  ${DIM}Pieces:${RESET}        ${TORRENT_PIECES} ($(format_size "$TORRENT_PIECE_LENGTH")/piece)"
     else
-        echo "  ${DIM}Taille:${RESET}        Inconnue"
+        echo "  ${DIM}Size:${RESET}          Unknown"
     fi
 
     if [[ -n "$TORRENT_TRACKER" ]]; then
@@ -393,26 +393,26 @@ display_torrent_info() {
     fi
 
     if [[ -n "$TORRENT_COMMENT" ]]; then
-        echo "  ${DIM}Commentaire:${RESET}   ${TORRENT_COMMENT}"
+        echo "  ${DIM}Comment:${RESET}       ${TORRENT_COMMENT}"
     fi
 
     echo ""
-    echo "${BOLD}  PARAMETRES DE SIMULATION${RESET}"
-    echo "  ${DIM}Upload simule:${RESET}   $(format_size "$UPLOAD_SIZE")"
-    echo "  ${DIM}Vitesse:${RESET}         ${UPLOAD_SPEED} KB/s"
+    echo "${BOLD}  SIMULATION PARAMETERS${RESET}"
+    echo "  ${DIM}Simulated upload:${RESET} $(format_size "$UPLOAD_SIZE")"
+    echo "  ${DIM}Speed:${RESET}            ${UPLOAD_SPEED} KB/s"
 
-    # Calculer la duree estimee
+    # Calculate estimated duration
     local speed_bytes=$((UPLOAD_SPEED * 1024))
     if [[ $speed_bytes -gt 0 ]]; then
         local estimated_seconds=$((UPLOAD_SIZE / speed_bytes))
-        echo "  ${DIM}Duree estimee:${RESET}   $(format_duration "$estimated_seconds")"
+        echo "  ${DIM}Estimated time:${RESET}   $(format_duration "$estimated_seconds")"
     fi
 
     echo ""
 }
 
 ################################################################################
-# BARRE DE PROGRESSION
+# PROGRESS BAR
 ################################################################################
 
 show_progress() {
@@ -420,13 +420,13 @@ show_progress() {
     local total=$2
     local speed=$3
 
-    # Pourcentage
+    # Percentage
     local percent=0
     if [[ $total -gt 0 ]]; then
         percent=$((current * 100 / total))
     fi
 
-    # Barre visuelle
+    # Visual bar
     local filled=$((percent * PROGRESS_BAR_WIDTH / 100))
     local empty=$((PROGRESS_BAR_WIDTH - filled))
 
@@ -452,7 +452,7 @@ show_progress() {
         eta_str="ETA --"
     fi
 
-    # Affichage sur une ligne (effacer la ligne pour eviter les artefacts)
+    # Display on one line (clear line to avoid artifacts)
     printf '\r\033[K  [%s] %3d%% | %s / %s | %s KB/s | %s ' \
         "$bar" "$percent" \
         "$(format_size "$current")" "$(format_size "$total")" \
@@ -460,18 +460,18 @@ show_progress() {
 }
 
 ################################################################################
-# SIMULATION D'UPLOAD
+# UPLOAD SIMULATION
 ################################################################################
 
 simulate_upload() {
-    echo "  ${BOLD}${BLUE}DEMARRAGE DE LA SIMULATION${RESET}"
-    echo "  ${DIM}(Aucune donnee n'est reellement envoyee)${RESET}"
+    echo "  ${BOLD}${BLUE}STARTING SIMULATION${RESET}"
+    echo "  ${DIM}(No data is actually sent)${RESET}"
     echo ""
 
     local uploaded=0
     local speed_bytes=$((UPLOAD_SPEED * 1024))
 
-    # Detecter le support de sleep fractionnaire
+    # Detect fractional sleep support
     local sleep_interval=0.1
     local updates_per_sec=10
     if ! sleep 0.1 2>/dev/null; then
@@ -480,10 +480,10 @@ simulate_upload() {
     fi
 
     local chunk_size=$((speed_bytes / updates_per_sec))
-    # Chunk minimum de 1 octet pour eviter boucle infinie
+    # Minimum chunk of 1 byte to avoid infinite loop
     [[ $chunk_size -lt 1 ]] && chunk_size=1
 
-    # Cacher le curseur pendant la simulation (terminal uniquement)
+    # Hide cursor during simulation (terminal only)
     [[ -t 1 ]] && printf '\033[?25l'
 
     while [[ $uploaded -lt $UPLOAD_SIZE ]]; do
@@ -496,60 +496,60 @@ simulate_upload() {
         sleep "$sleep_interval"
     done
 
-    # Affichage final a 100%
+    # Final display at 100%
     show_progress "$UPLOAD_SIZE" "$UPLOAD_SIZE" "$UPLOAD_SPEED"
-    [[ -t 1 ]] && printf '\033[?25h'  # Restaurer le curseur
+    [[ -t 1 ]] && printf '\033[?25h'  # Restore cursor
     echo ""
     echo ""
 
-    # Calcul du ratio simule
+    # Calculate simulated ratio
     local download_size
     if [[ "$TORRENT_SIZE" != "0" ]]; then
         download_size=$TORRENT_SIZE
     else
-        download_size=$((1024 * 1024 * 1024))  # 1 Go par defaut
+        download_size=$((1024 * 1024 * 1024))  # 1 GB default
     fi
 
     local ratio
     ratio=$(awk -v up="$UPLOAD_SIZE" -v down="$download_size" 'BEGIN { printf "%.2f", up / down }')
 
-    echo "  ${BOLD}${GREEN}SIMULATION TERMINEE${RESET}"
+    echo "  ${BOLD}${GREEN}SIMULATION COMPLETE${RESET}"
     echo ""
-    echo "  ${BOLD}RESULTATS${RESET}"
-    echo "  ${DIM}Uploade:${RESET}       $(format_size "$UPLOAD_SIZE")"
+    echo "  ${BOLD}RESULTS${RESET}"
+    echo "  ${DIM}Uploaded:${RESET}      $(format_size "$UPLOAD_SIZE")"
 
     if [[ "$TORRENT_SIZE" != "0" ]]; then
-        echo "  ${DIM}Taille torrent:${RESET} $(format_size "$download_size")"
+        echo "  ${DIM}Torrent size:${RESET}  $(format_size "$download_size")"
     fi
 
-    echo "  ${DIM}Ratio simule:${RESET}  ${BOLD}${ratio}${RESET}"
+    echo "  ${DIM}Simulated ratio:${RESET} ${BOLD}${ratio}${RESET}"
 
     local ratio_status
     ratio_status=$(awk -v r="$ratio" 'BEGIN { print (r < 1.0) ? "low" : (r > 1.0) ? "high" : "equal" }')
 
     case "$ratio_status" in
         low)
-            echo "  ${DIM}Statut:${RESET}        ${YELLOW}Ratio inferieur a 1.0${RESET}"
+            echo "  ${DIM}Status:${RESET}        ${YELLOW}Ratio below 1.0${RESET}"
             ;;
         equal)
-            echo "  ${DIM}Statut:${RESET}        ${GREEN}Ratio egal a 1.0${RESET}"
+            echo "  ${DIM}Status:${RESET}        ${GREEN}Ratio equal to 1.0${RESET}"
             ;;
         high)
-            echo "  ${DIM}Statut:${RESET}        ${GREEN}Ratio superieur a 1.0 - Excellent !${RESET}"
+            echo "  ${DIM}Status:${RESET}        ${GREEN}Ratio above 1.0 - Excellent!${RESET}"
             ;;
     esac
 
     echo ""
-    echo "  ${BOLD}CONSEIL${RESET}"
-    echo "  Pour maintenir un bon ratio sur un tracker reel :"
-    echo "  1. Laisse tes torrents en seed apres le telechargement"
-    echo "  2. Priorise les nouveaux torrents (freeleech)"
-    echo "  3. Utilise un seedbox si ta connexion est limitee"
+    echo "  ${BOLD}TIP${RESET}"
+    echo "  To maintain a good ratio on a real tracker:"
+    echo "  1. Leave your torrents seeding after download"
+    echo "  2. Prioritize new torrents (freeleech)"
+    echo "  3. Use a seedbox if your connection is limited"
     echo ""
 }
 
 ################################################################################
-# PARSING DES ARGUMENTS
+# ARGUMENT PARSING
 ################################################################################
 
 parse_arguments() {
@@ -565,42 +565,42 @@ parse_arguments() {
                 ;;
             -s|--speed)
                 if [[ -z "${2:-}" ]]; then
-                    error "L'option --speed requiert une valeur"
+                    error "Option --speed requires a value"
                 fi
                 if ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                    error "La vitesse doit etre un nombre entier positif"
+                    error "Speed must be a positive integer"
                 fi
                 if [[ "$2" -eq 0 ]]; then
-                    error "La vitesse ne peut pas etre 0"
+                    error "Speed cannot be 0"
                 fi
                 UPLOAD_SPEED="$2"
                 shift 2
                 ;;
             -S|--size)
                 if [[ -z "${2:-}" ]]; then
-                    error "L'option --size requiert une valeur (en Mo)"
+                    error "Option --size requires a value (in MB)"
                 fi
                 if ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                    error "La taille doit etre un nombre entier positif"
+                    error "Size must be a positive integer"
                 fi
                 if [[ "$2" -eq 0 ]]; then
-                    error "La taille ne peut pas etre 0"
+                    error "Size cannot be 0"
                 fi
                 if [[ "$2" -gt 8388608 ]]; then
-                    error "La taille ne peut pas depasser 8388608 Mo (8 To)"
+                    error "Size cannot exceed 8388608 MB (8 TB)"
                 fi
                 UPLOAD_SIZE=$(($2 * 1024 * 1024))
                 shift 2
                 ;;
             -t|--time)
                 if [[ -z "${2:-}" ]]; then
-                    error "L'option --time requiert une valeur"
+                    error "Option --time requires a value"
                 fi
                 if ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                    error "Le temps doit etre un nombre entier positif"
+                    error "Time must be a positive integer"
                 fi
                 if [[ "$2" -eq 0 ]]; then
-                    error "Le temps ne peut pas etre 0"
+                    error "Time cannot be 0"
                 fi
                 SIMULATION_TIME="$2"
                 shift 2
@@ -618,11 +618,11 @@ parse_arguments() {
                 shift
                 ;;
             -*)
-                error "Option inconnue: $1 (utilise -h pour l'aide)"
+                error "Unknown option: $1 (use -h for help)"
                 ;;
             *)
                 if [[ -n "$TORRENT_FILE" ]]; then
-                    error "Trop de fichiers specifies. Un seul fichier .torrent attendu."
+                    error "Too many files specified. Only one .torrent file expected."
                 fi
                 TORRENT_FILE="$1"
                 shift
@@ -631,14 +631,14 @@ parse_arguments() {
     done
 
     if [[ -z "$TORRENT_FILE" ]]; then
-        error "Aucun fichier torrent specifie. Utilise -h pour l'aide."
+        error "No torrent file specified. Use -h for help."
     fi
 
     if [[ ! "$TORRENT_FILE" =~ \.torrent$ ]]; then
-        error "Le fichier doit avoir l'extension .torrent"
+        error "File must have .torrent extension"
     fi
 
-    # Si --time est specifie, recalculer la vitesse
+    # If --time is specified, recalculate speed
     if [[ $SIMULATION_TIME -gt 0 ]]; then
         UPLOAD_SPEED=$((UPLOAD_SIZE / SIMULATION_TIME / 1024))
         if [[ $UPLOAD_SPEED -lt 1 ]]; then
@@ -648,7 +648,7 @@ parse_arguments() {
 }
 
 ################################################################################
-# POINT D'ENTREE
+# ENTRY POINT
 ################################################################################
 
 main() {
@@ -658,7 +658,7 @@ main() {
     display_torrent_info
 
     if [[ "$DRY_RUN" == true ]]; then
-        echo "  ${DIM}MODE DRY-RUN - Aucune simulation effectuee${RESET}"
+        echo "  ${DIM}DRY-RUN MODE - No simulation performed${RESET}"
         exit 0
     fi
 
