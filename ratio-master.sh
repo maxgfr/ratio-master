@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 
 ################################################################################
-# ratio-master - Educational torrent upload simulator
+# ratio-master - Torrent ratio tool via real HTTP tracker announces
 #
 # Usage: ratio-master.sh [OPTIONS] <file.torrent>
 #
-# Simulates upload progress locally to understand ratio
-# on BitTorrent trackers. No actual network connection.
+# Sends real HTTP announce requests to the tracker extracted from
+# the .torrent file, reporting incremental upload values.
 #
 # License: MIT
 ################################################################################
@@ -19,20 +19,25 @@ readonly VERSION="1.0.3"
 # DEFAULT CONFIGURATION
 ################################################################################
 
-readonly DEFAULT_UPLOAD_SIZE=$((5 * 1024 * 1024))  # 5 MB in bytes
 readonly DEFAULT_SPEED=512                          # 512 KB/s
-readonly PROGRESS_BAR_WIDTH=40
 
 ################################################################################
 # GLOBAL VARIABLES
 ################################################################################
 
 TORRENT_FILE=""
-UPLOAD_SIZE=$DEFAULT_UPLOAD_SIZE
 UPLOAD_SPEED=$DEFAULT_SPEED
-SIMULATION_TIME=0
+UPLOADED=0
+DOWNLOADED=0
+SIMULATION_START=0
 DRY_RUN=false
 VERBOSE=false
+
+INFO_HASH=""              # info_hash URL-encoded (%xx%xx...)
+INFO_HASH_HEX=""          # info_hash in hex (for display)
+PEER_ID=""                # peer_id URL-encoded
+ANNOUNCE_INTERVAL=1800    # interval between announces (updated by tracker)
+LAST_ANNOUNCE_TIME=0      # epoch of last successful announce
 
 # Respect the NO_COLOR standard (https://no-color.org/)
 # Capture env var BEFORE replacing it with our internal variable
@@ -143,6 +148,27 @@ format_duration() {
 }
 
 ################################################################################
+# DEPENDENCY CHECK
+################################################################################
+
+check_dependencies() {
+    local missing=()
+
+    if ! command -v curl &>/dev/null; then
+        missing+=("curl")
+    fi
+
+    # Need either shasum or openssl for SHA1
+    if ! command -v shasum &>/dev/null && ! command -v openssl &>/dev/null; then
+        missing+=("shasum or openssl")
+    fi
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        error "Missing required dependencies: ${missing[*]}"
+    fi
+}
+
+################################################################################
 # HELP AND VERSION
 ################################################################################
 
@@ -156,11 +182,8 @@ SYNOPSIS
     ratio-master.sh [OPTIONS] <file.torrent>
 
 DESCRIPTION
-    Simulates torrent upload progress locally to understand
-    how ratio tracking works on BitTorrent trackers.
-
-    This script performs NO actual network connection and does not
-    communicate with any tracker. It's purely educational.
+    Sends real HTTP announce requests to the tracker extracted
+    from the .torrent file, reporting incremental upload values.
 
 ARGUMENTS
     <file.torrent>
@@ -168,19 +191,11 @@ ARGUMENTS
 
 OPTIONS
     -s, --speed <KB/s>
-        Simulated upload speed in kilobytes per second
+        Upload speed in kilobytes per second
         Default: 512 KB/s
 
-    -S, --size <MB>
-        Amount of upload to simulate in megabytes
-        Default: 5 MB
-
-    -t, --time <seconds>
-        Simulation duration in seconds
-        Speed is automatically calculated
-
     --dry-run
-        Display information without running the simulation
+        Display information without sending any announce
 
     --no-color
         Disable colored output
@@ -195,17 +210,11 @@ OPTIONS
         Display this help
 
 EXAMPLES
-    # Simulation with default parameters (512 KB/s, 5 MB)
+    # Announce with default speed (512 KB/s), runs until Ctrl+C
     ratio-master.sh my-file.torrent
 
-    # Simulation with custom speed (1 MB/s)
+    # Announce with custom speed (1 MB/s)
     ratio-master.sh --speed 1024 my-file.torrent
-
-    # Simulate uploading 50 MB
-    ratio-master.sh --size 50 my-file.torrent
-
-    # 30-second simulation
-    ratio-master.sh --time 30 my-file.torrent
 
     # Display info only
     ratio-master.sh --dry-run my-file.torrent
@@ -217,9 +226,8 @@ RATIO CALCULATION
     - Ratio > 1.0  : You're a good community member!
 
 NOTE
-    This script is purely educational. To improve your actual
-    ratio on a tracker, leave your torrents seeding after
-    downloading.
+    This tool sends real HTTP requests to the tracker.
+    Use responsibly and only on trackers you are authorized to use.
 
 EOF
 }
@@ -366,6 +374,209 @@ parse_torrent() {
 }
 
 ################################################################################
+# INFO HASH & PEER ID
+################################################################################
+
+compute_info_hash() {
+    local torrent_file="$1"
+
+    verbose "Computing info_hash (pure shell)"
+
+    # Read file as hex bytes (space-separated, lowercase)
+    local hex_bytes
+    hex_bytes=$(od -An -tx1 -v "$torrent_file" | tr -d '\n ')
+
+    # Find "4:info" in hex: 34 3a 69 6e 66 6f
+    local needle="343a696e666f"
+    local prefix="${hex_bytes%%"$needle"*}"
+
+    if [[ "${#prefix}" -eq "${#hex_bytes}" ]]; then
+        error "No info dict found in torrent file"
+    fi
+
+    # Byte offset where the info value starts (after "4:info" = 6 bytes)
+    local info_start=$(( ${#prefix} / 2 + 6 ))
+
+    # Parse bencode from hex to find the end of the info dict
+    # We work on the hex string, 2 hex chars = 1 byte
+    local pos=$((info_start * 2))
+
+    # Recursive bencode end finder
+    _skip_bencode_value() {
+        local p=$1
+        local ch="${hex_bytes:$p:2}"
+
+        case "$ch" in
+            64|6c)  # 'd' (0x64) or 'l' (0x6c) — dict or list
+                p=$((p + 2))
+                while [[ "${hex_bytes:$p:2}" != "65" ]]; do  # not 'e' (0x65)
+                    p=$(_skip_bencode_value "$p")
+                done
+                echo $((p + 2))  # skip the 'e'
+                ;;
+            69)  # 'i' (0x69) — integer i<digits>e
+                p=$((p + 2))
+                while [[ "${hex_bytes:$p:2}" != "65" ]]; do
+                    p=$((p + 2))
+                done
+                echo $((p + 2))  # skip the 'e'
+                ;;
+            3[0-9]|[0-9][0-9])  # digit — string length prefix
+                # Collect ASCII digits until we hit ':' (0x3a)
+                local num_str=""
+                while [[ "${hex_bytes:$p:2}" != "3a" ]]; do
+                    # Convert hex to ASCII char
+                    local byte_val=$((16#${hex_bytes:$p:2}))
+                    if [[ $byte_val -ge 48 && $byte_val -le 57 ]]; then
+                        num_str+=$(printf '%b' "\\$(printf '%03o' "$byte_val")")
+                    else
+                        break
+                    fi
+                    p=$((p + 2))
+                done
+                p=$((p + 2))  # skip ':'
+                local str_len=$((num_str))
+                echo $((p + str_len * 2))
+                ;;
+            *)
+                error "Unexpected bencode byte at offset $((p/2)): 0x$ch"
+                ;;
+        esac
+    }
+
+    local end_pos
+    end_pos=$(_skip_bencode_value "$pos")
+    local info_end=$((end_pos / 2))
+    local info_len=$((info_end - info_start))
+
+    verbose "Info dict: offset=$info_start length=$info_len"
+
+    # Extract info dict bytes and compute SHA1
+    local sha1_hex
+    if command -v shasum &>/dev/null; then
+        sha1_hex=$(dd if="$torrent_file" bs=1 skip="$info_start" count="$info_len" 2>/dev/null | shasum -a 1 | cut -d' ' -f1)
+    else
+        sha1_hex=$(dd if="$torrent_file" bs=1 skip="$info_start" count="$info_len" 2>/dev/null | openssl dgst -sha1 -r | cut -d' ' -f1)
+    fi
+
+    INFO_HASH_HEX="$sha1_hex"
+
+    # URL-encode: %xx for each byte of the SHA1 digest
+    INFO_HASH=""
+    local i
+    for (( i=0; i<${#sha1_hex}; i+=2 )); do
+        INFO_HASH+="%${sha1_hex:$i:2}"
+    done
+
+    verbose "info_hash (hex): $INFO_HASH_HEX"
+    verbose "info_hash (url): $INFO_HASH"
+}
+
+generate_peer_id() {
+    local random_part
+    random_part=$(LC_ALL=C head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 12)
+
+    # Format: -RM0100-<12 random chars>
+    local raw="-RM0100-${random_part}"
+
+    # URL-encode: encode each byte
+    PEER_ID=""
+    local i ch
+    for (( i=0; i<${#raw}; i++ )); do
+        ch="${raw:$i:1}"
+        case "$ch" in
+            [a-zA-Z0-9._~])
+                PEER_ID+="$ch"
+                ;;
+            *)
+                PEER_ID+=$(printf '%%%02x' "'$ch")
+                ;;
+        esac
+    done
+
+    verbose "peer_id (raw): $raw"
+    verbose "peer_id (url): $PEER_ID"
+}
+
+################################################################################
+# TRACKER COMMUNICATION
+################################################################################
+
+send_announce() {
+    local event="${1:-}"
+
+    if [[ -z "$TORRENT_TRACKER" ]]; then
+        verbose "No tracker URL, skipping announce"
+        return 1
+    fi
+
+    # Build query parameters
+    local url="${TORRENT_TRACKER}"
+    url+="?info_hash=${INFO_HASH}"
+    url+="&peer_id=${PEER_ID}"
+    url+="&port=6881"
+    url+="&uploaded=${UPLOADED}"
+    url+="&downloaded=${DOWNLOADED}"
+    url+="&left=0"
+    url+="&compact=1"
+
+    if [[ -n "$event" ]]; then
+        url+="&event=${event}"
+    fi
+
+    verbose "Announce URL: $url"
+
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    local http_code
+    http_code=$(curl --silent --max-time 30 --output "$tmpfile" --write-out '%{http_code}' "$url" 2>/dev/null) || {
+        rm -f "$tmpfile"
+        verbose "Network error during announce"
+        echo "NETWORK_ERROR"
+        return 0
+    }
+
+    if [[ "$http_code" -ne 200 ]]; then
+        rm -f "$tmpfile"
+        verbose "HTTP error: $http_code"
+        echo "HTTP_ERROR:${http_code}"
+        return 0
+    fi
+
+    parse_tracker_response "$tmpfile"
+    rm -f "$tmpfile"
+}
+
+parse_tracker_response() {
+    local response_file="$1"
+    local content
+
+    content=$(LC_ALL=C cat "$response_file" 2>/dev/null) || {
+        echo "NETWORK_ERROR"
+        return 0
+    }
+
+    # Check for failure reason
+    if [[ "$content" =~ 14:failure\ reason([0-9]+): ]]; then
+        local reason_len="${BASH_REMATCH[1]}"
+        local after="${content#*14:failure reason"${reason_len}":}"
+        local reason="${after:0:$reason_len}"
+        verbose "Tracker failure: $reason"
+        echo "TRACKER_ERROR:${reason}"
+        return 0
+    fi
+
+    # Extract interval
+    if [[ "$content" =~ 8:intervali([0-9]+)e ]]; then
+        ANNOUNCE_INTERVAL="${BASH_REMATCH[1]}"
+        verbose "Tracker interval: ${ANNOUNCE_INTERVAL}s"
+    fi
+
+    echo "OK"
+}
+
+################################################################################
 # INFORMATION DISPLAY
 ################################################################################
 
@@ -397,112 +608,52 @@ display_torrent_info() {
     fi
 
     echo ""
-    echo "${BOLD}  SIMULATION PARAMETERS${RESET}"
-    echo "  ${DIM}Simulated upload:${RESET} $(format_size "$UPLOAD_SIZE")"
+    echo "${BOLD}  ANNOUNCE PARAMETERS${RESET}"
     echo "  ${DIM}Speed:${RESET}            ${UPLOAD_SPEED} KB/s"
-
-    # Calculate estimated duration
-    local speed_bytes=$((UPLOAD_SPEED * 1024))
-    if [[ $speed_bytes -gt 0 ]]; then
-        local estimated_seconds=$((UPLOAD_SIZE / speed_bytes))
-        echo "  ${DIM}Estimated time:${RESET}   $(format_duration "$estimated_seconds")"
-    fi
+    echo "  ${DIM}Mode:${RESET}             Announce (Ctrl+C to stop)"
 
     echo ""
 }
 
 ################################################################################
-# PROGRESS BAR
+# STATUS DISPLAY
 ################################################################################
 
-show_progress() {
-    local current=$1
-    local total=$2
+show_status() {
+    local uploaded=$1
+    local torrent_size=$2
     local speed=$3
+    local elapsed=$4
+    local next_in=$5
 
-    # Percentage
-    local percent=0
-    if [[ $total -gt 0 ]]; then
-        percent=$((current * 100 / total))
-    fi
+    local ratio_str
+    ratio_str=$(awk -v up="$uploaded" -v down="$torrent_size" 'BEGIN {
+        if (down > 0) printf "%.2f", up / down
+        else printf "0.00"
+    }')
 
-    # Visual bar
-    local filled=$((percent * PROGRESS_BAR_WIDTH / 100))
-    local empty=$((PROGRESS_BAR_WIDTH - filled))
+    local elapsed_str
+    elapsed_str=$(format_duration "$elapsed")
 
-    local bar=""
-    bar+="${GREEN}"
-    for ((i = 0; i < filled; i++)); do
-        bar+="█"
-    done
-    bar+="${DIM}"
-    for ((i = 0; i < empty; i++)); do
-        bar+="░"
-    done
-    bar+="${RESET}"
+    local next_str
+    next_str=$(format_duration "$next_in")
 
-    # ETA
-    local eta_str=""
-    if [[ $current -gt 0 && $speed -gt 0 ]]; then
-        local remaining_bytes=$((total - current))
-        local speed_bytes=$((speed * 1024))
-        local eta_seconds=$((remaining_bytes / speed_bytes))
-        eta_str="ETA $(format_duration $eta_seconds)"
-    else
-        eta_str="ETA --"
-    fi
-
-    # Display on one line (clear line to avoid artifacts)
-    printf '\r\033[K  [%s] %3d%% | %s / %s | %s KB/s | %s ' \
-        "$bar" "$percent" \
-        "$(format_size "$current")" "$(format_size "$total")" \
-        "$speed" "$eta_str"
+    printf '\r\033[K  %s uploaded | ratio %s | %s KB/s | %s elapsed | next announce in %s ' \
+        "$(format_size "$uploaded")" "$ratio_str" \
+        "$speed" "$elapsed_str" "$next_str"
 }
 
 ################################################################################
-# UPLOAD SIMULATION
+# ANNOUNCE LOOP
 ################################################################################
 
-simulate_upload() {
-    echo "  ${BOLD}${BLUE}STARTING SIMULATION${RESET}"
-    echo "  ${DIM}(No data is actually sent)${RESET}"
-    echo ""
-
-    local uploaded=0
-    local speed_bytes=$((UPLOAD_SPEED * 1024))
-
-    # Detect fractional sleep support
-    local sleep_interval=0.1
-    local updates_per_sec=10
-    if ! sleep 0.1 2>/dev/null; then
-        sleep_interval=1
-        updates_per_sec=1
-    fi
-
-    local chunk_size=$((speed_bytes / updates_per_sec))
-    # Minimum chunk of 1 byte to avoid infinite loop
-    [[ $chunk_size -lt 1 ]] && chunk_size=1
-
-    # Hide cursor during simulation (terminal only)
-    [[ -t 1 ]] && printf '\033[?25l'
-
-    while [[ $uploaded -lt $UPLOAD_SIZE ]]; do
-        local remaining=$((UPLOAD_SIZE - uploaded))
-        local current_chunk=$((chunk_size < remaining ? chunk_size : remaining))
-        uploaded=$((uploaded + current_chunk))
-
-        show_progress "$uploaded" "$UPLOAD_SIZE" "$UPLOAD_SPEED"
-
-        sleep "$sleep_interval"
-    done
-
-    # Final display at 100%
-    show_progress "$UPLOAD_SIZE" "$UPLOAD_SIZE" "$UPLOAD_SPEED"
-    [[ -t 1 ]] && printf '\033[?25h'  # Restore cursor
+show_final_results() {
+    # Restore cursor
+    [[ -t 1 ]] && printf '\033[?25h'
     echo ""
     echo ""
 
-    # Calculate simulated ratio
+    # Calculate ratio
     local download_size
     if [[ "$TORRENT_SIZE" != "0" ]]; then
         download_size=$TORRENT_SIZE
@@ -511,18 +662,21 @@ simulate_upload() {
     fi
 
     local ratio
-    ratio=$(awk -v up="$UPLOAD_SIZE" -v down="$download_size" 'BEGIN { printf "%.2f", up / down }')
+    ratio=$(awk -v up="$UPLOADED" -v down="$download_size" 'BEGIN { printf "%.2f", up / down }')
 
-    echo "  ${BOLD}${GREEN}SIMULATION COMPLETE${RESET}"
+    local elapsed=$((SECONDS - SIMULATION_START))
+
+    echo "  ${BOLD}${YELLOW}ANNOUNCE STOPPED${RESET} (Ctrl+C)"
     echo ""
     echo "  ${BOLD}RESULTS${RESET}"
-    echo "  ${DIM}Uploaded:${RESET}      $(format_size "$UPLOAD_SIZE")"
+    echo "  ${DIM}Uploaded:${RESET}      $(format_size "$UPLOADED")"
+    echo "  ${DIM}Duration:${RESET}      $(format_duration "$elapsed")"
 
     if [[ "$TORRENT_SIZE" != "0" ]]; then
         echo "  ${DIM}Torrent size:${RESET}  $(format_size "$download_size")"
     fi
 
-    echo "  ${DIM}Simulated ratio:${RESET} ${BOLD}${ratio}${RESET}"
+    echo "  ${DIM}Reported ratio:${RESET} ${BOLD}${ratio}${RESET}"
 
     local ratio_status
     ratio_status=$(awk -v r="$ratio" 'BEGIN { print (r < 1.0) ? "low" : (r > 1.0) ? "high" : "equal" }')
@@ -546,6 +700,106 @@ simulate_upload() {
     echo "  2. Prioritize new torrents (freeleech)"
     echo "  3. Use a seedbox if your connection is limited"
     echo ""
+}
+
+send_stopped_and_exit() {
+    verbose "Sending stopped announce..."
+    local result
+    result=$(send_announce "stopped") || true
+    verbose "Stopped announce result: ${result:-empty}"
+    show_final_results
+    exit 0
+}
+
+run_announce_loop() {
+    compute_info_hash "$TORRENT_FILE"
+    generate_peer_id
+
+    # Set downloaded = torrent size (pretend we have the full file)
+    if [[ "$TORRENT_SIZE" != "0" ]]; then
+        DOWNLOADED=$TORRENT_SIZE
+    else
+        DOWNLOADED=$((1024 * 1024 * 1024))
+    fi
+
+    local torrent_size
+    if [[ "$TORRENT_SIZE" != "0" ]]; then
+        torrent_size=$TORRENT_SIZE
+    else
+        torrent_size=$((1024 * 1024 * 1024))
+    fi
+
+    echo "  ${BOLD}${BLUE}STARTING ANNOUNCES${RESET}"
+    echo "  ${DIM}(Ctrl+C to stop)${RESET}"
+    echo ""
+
+    # Send initial "started" announce
+    verbose "Sending started announce..."
+    local result
+    result=$(send_announce "started")
+    case "$result" in
+        OK)
+            echo "  ${GREEN}Tracker responded OK (interval: ${ANNOUNCE_INTERVAL}s)${RESET}"
+            ;;
+        TRACKER_ERROR:*)
+            echo "  ${RED}Tracker error: ${result#TRACKER_ERROR:}${RESET}"
+            ;;
+        HTTP_ERROR:*)
+            echo "  ${YELLOW}HTTP error: ${result#HTTP_ERROR:}${RESET}"
+            ;;
+        NETWORK_ERROR)
+            echo "  ${YELLOW}Network error (will retry)${RESET}"
+            ;;
+    esac
+    echo ""
+
+    local speed_bytes=$((UPLOAD_SPEED * 1024))
+
+    # Detect fractional sleep support
+    local sleep_interval=1
+    if sleep 0.1 2>/dev/null; then
+        sleep_interval=0.1
+    fi
+
+    local updates_per_sec
+    if [[ "$sleep_interval" == "0.1" ]]; then
+        updates_per_sec=10
+    else
+        updates_per_sec=1
+    fi
+
+    local chunk_size=$((speed_bytes / updates_per_sec))
+    [[ $chunk_size -lt 1 ]] && chunk_size=1
+
+    # Set up SIGINT trap
+    trap 'send_stopped_and_exit' INT
+
+    # Hide cursor during loop (terminal only)
+    [[ -t 1 ]] && printf '\033[?25l'
+
+    UPLOADED=0
+    SIMULATION_START=$SECONDS
+    LAST_ANNOUNCE_TIME=$SECONDS
+
+    while true; do
+        UPLOADED=$((UPLOADED + chunk_size))
+        local elapsed=$((SECONDS - SIMULATION_START))
+        local since_last=$((SECONDS - LAST_ANNOUNCE_TIME))
+        local next_in=$((ANNOUNCE_INTERVAL - since_last))
+        [[ $next_in -lt 0 ]] && next_in=0
+
+        show_status "$UPLOADED" "$torrent_size" "$UPLOAD_SPEED" "$elapsed" "$next_in"
+
+        # Time for a regular announce?
+        if [[ $since_last -ge $ANNOUNCE_INTERVAL ]]; then
+            verbose "Sending regular announce (uploaded: $UPLOADED)"
+            result=$(send_announce "")
+            LAST_ANNOUNCE_TIME=$SECONDS
+            verbose "Announce result: $result"
+        fi
+
+        sleep "$sleep_interval"
+    done
 }
 
 ################################################################################
@@ -574,35 +828,6 @@ parse_arguments() {
                     error "Speed cannot be 0"
                 fi
                 UPLOAD_SPEED="$2"
-                shift 2
-                ;;
-            -S|--size)
-                if [[ -z "${2:-}" ]]; then
-                    error "Option --size requires a value (in MB)"
-                fi
-                if ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                    error "Size must be a positive integer"
-                fi
-                if [[ "$2" -eq 0 ]]; then
-                    error "Size cannot be 0"
-                fi
-                if [[ "$2" -gt 8388608 ]]; then
-                    error "Size cannot exceed 8388608 MB (8 TB)"
-                fi
-                UPLOAD_SIZE=$(($2 * 1024 * 1024))
-                shift 2
-                ;;
-            -t|--time)
-                if [[ -z "${2:-}" ]]; then
-                    error "Option --time requires a value"
-                fi
-                if ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                    error "Time must be a positive integer"
-                fi
-                if [[ "$2" -eq 0 ]]; then
-                    error "Time cannot be 0"
-                fi
-                SIMULATION_TIME="$2"
                 shift 2
                 ;;
             --dry-run)
@@ -637,14 +862,6 @@ parse_arguments() {
     if [[ ! "$TORRENT_FILE" =~ \.torrent$ ]]; then
         error "File must have .torrent extension"
     fi
-
-    # If --time is specified, recalculate speed
-    if [[ $SIMULATION_TIME -gt 0 ]]; then
-        UPLOAD_SPEED=$((UPLOAD_SIZE / SIMULATION_TIME / 1024))
-        if [[ $UPLOAD_SPEED -lt 1 ]]; then
-            UPLOAD_SPEED=1
-        fi
-    fi
 }
 
 ################################################################################
@@ -654,15 +871,19 @@ parse_arguments() {
 main() {
     setup_colors
     parse_arguments "$@"
+    check_dependencies
     parse_torrent "$TORRENT_FILE"
     display_torrent_info
 
     if [[ "$DRY_RUN" == true ]]; then
-        echo "  ${DIM}DRY-RUN MODE - No simulation performed${RESET}"
+        compute_info_hash "$TORRENT_FILE"
+        echo "  ${DIM}info_hash:${RESET}  $INFO_HASH_HEX"
+        echo ""
+        echo "  ${DIM}DRY-RUN MODE -- No announce sent${RESET}"
         exit 0
     fi
 
-    simulate_upload
+    run_announce_loop
 }
 
 main "$@"

@@ -55,4 +55,4 @@ jobs:
         run: |
           chmod +x ratio-master.sh
           ./ratio-master.sh --dry-run --no-color tests/fixtures/simple.torrent
-          ./ratio-master.sh --dry-run --no-color --size 100 --speed 2048 tests/fixtures/large.torrent
+          ./ratio-master.sh --dry-run --no-color --speed 2048 tests/fixtures/large.torrent

@@ -57,6 +57,18 @@ FIXTURES="$BATS_TEST_DIRNAME/fixtures"
     [[ "$output" == *"Unknown option"* ]]
 }
 
+@test "fails with removed --size option" {
+    run "$SCRIPT" --size 50 "$FIXTURES/simple.torrent"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unknown option"* ]]
+}
+
+@test "fails with removed --time option" {
+    run "$SCRIPT" --time 60 "$FIXTURES/simple.torrent"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unknown option"* ]]
+}
+
 ################################################################################
 # ERROR HANDLING - OPTION VALIDATION
 ################################################################################
@@ -79,35 +91,6 @@ FIXTURES="$BATS_TEST_DIRNAME/fixtures"
     [[ "$output" == *"cannot be 0"* ]]
 }
 
-@test "fails with --size without value" {
-    run "$SCRIPT" --size
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"requires a value"* ]]
-}
-
-@test "fails with --size non-numeric" {
-    run "$SCRIPT" --size abc "$FIXTURES/simple.torrent"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"positive integer"* ]]
-}
-
-@test "fails with --size 0" {
-    run "$SCRIPT" --size 0 "$FIXTURES/simple.torrent"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"cannot be 0"* ]]
-}
-
-@test "fails with --time without value" {
-    run "$SCRIPT" --time
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"requires a value"* ]]
-}
-
-@test "fails with --time 0" {
-    run "$SCRIPT" --time 0 "$FIXTURES/simple.torrent"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"cannot be 0"* ]]
-}
 
 ################################################################################
 # INVALID TORRENT
@@ -123,7 +106,7 @@ FIXTURES="$BATS_TEST_DIRNAME/fixtures"
 # DRY-RUN MODE
 ################################################################################
 
-@test "dry-run shows torrent info without simulation" {
+@test "dry-run shows torrent info without announce" {
     run "$SCRIPT" --dry-run --no-color "$FIXTURES/simple.torrent"
     [ "$status" -eq 0 ]
     [[ "$output" == *"TORRENT FILE"* ]]
@@ -142,6 +125,21 @@ FIXTURES="$BATS_TEST_DIRNAME/fixtures"
     run "$SCRIPT" --dry-run --no-color "$FIXTURES/simple.torrent"
     [ "$status" -eq 0 ]
     [[ "$output" == *"Test torrent"* ]]
+}
+
+@test "dry-run shows announce mode" {
+    run "$SCRIPT" --dry-run --no-color "$FIXTURES/simple.torrent"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Announce"* ]]
+    [[ "$output" == *"Ctrl+C"* ]]
+}
+
+@test "dry-run shows info_hash" {
+    run "$SCRIPT" --dry-run --no-color "$FIXTURES/simple.torrent"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"info_hash"* ]]
+    # info_hash should be 40 hex chars
+    [[ "$output" =~ [0-9a-f]{40} ]]
 }
 
 ################################################################################
@@ -191,24 +189,6 @@ FIXTURES="$BATS_TEST_DIRNAME/fixtures"
     run "$SCRIPT" --dry-run --no-color -s 256 "$FIXTURES/simple.torrent"
     [ "$status" -eq 0 ]
     [[ "$output" == *"256 KB/s"* ]]
-}
-
-@test "accepts --size option" {
-    run "$SCRIPT" --dry-run --no-color --size 50 "$FIXTURES/simple.torrent"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"50 MB"* ]]
-}
-
-@test "accepts -S shorthand" {
-    run "$SCRIPT" --dry-run --no-color -S 20 "$FIXTURES/simple.torrent"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"20 MB"* ]]
-}
-
-@test "accepts --time option" {
-    run "$SCRIPT" --dry-run --no-color --time 60 "$FIXTURES/simple.torrent"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"KB/s"* ]]
 }
 
 @test "accepts --verbose option" {

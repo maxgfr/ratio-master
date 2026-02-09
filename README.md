@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/maxgfr/ratio-master/actions/workflows/ci.yml/badge.svg)](https://github.com/maxgfr/ratio-master/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A local torrent upload simulator for educational purposes. Parses `.torrent` files and simulates upload progress to help understand how BitTorrent ratio tracking works.
+A torrent ratio tool that sends real HTTP announce requests to BitTorrent trackers. Parses `.torrent` files, computes info_hash, and reports incremental upload values to the tracker.
 
-**No data is ever sent over the network.** This is a purely local simulation.
+**⚠️ This tool sends real HTTP requests to trackers. Use responsibly and only on trackers you are authorized to use.**
 
 ```
   ____       _   _           __  __           _
@@ -18,10 +18,12 @@ A local torrent upload simulator for educational purposes. Parses `.torrent` fil
 
 - Parses real `.torrent` files (single-file and multi-file)
 - Displays torrent metadata (name, size, pieces, tracker, comment)
-- Simulates upload with a live progress bar and ETA
-- Calculates the resulting ratio
+- Computes info_hash in pure shell (no Python dependency)
+- Sends real HTTP announces to the tracker (`started`, regular updates, `stopped`)
+- Reports incremental upload values with configurable speed
+- Displays live status: uploaded, ratio, speed, elapsed time, next announce
 - Works on **Linux** and **macOS**
-- Zero dependencies beyond `bash` and `awk` (100% pure bash implementation)
+- Pure shell implementation with minimal dependencies
 - Respects the [NO_COLOR](https://no-color.org/) standard
 
 ## Installation
@@ -53,6 +55,8 @@ ln -s "$(pwd)/ratio-master.sh" /usr/local/bin/ratio-master
 ### Requirements
 
 - **bash** 4.0+
+- **curl** (for HTTP requests to tracker)
+- **shasum** or **openssl** (for SHA1 computation of info_hash)
 - **awk** (included on all Unix systems)
 
 ## Usage
@@ -65,10 +69,8 @@ ratio-master.sh [OPTIONS] <file.torrent>
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-s, --speed <KB/s>` | Simulated upload speed in KB/s | `512` |
-| `-S, --size <MB>` | Amount of upload to simulate in MB | `5` |
-| `-t, --time <seconds>` | Simulation duration (speed auto-calculated) | - |
-| `--dry-run` | Show torrent info without running the simulation | - |
+| `-s, --speed <KB/s>` | Upload speed in KB/s | `512` |
+| `--dry-run` | Show torrent info and info_hash without sending announces | - |
 | `--no-color` | Disable colored output | - |
 | `-v, --verbose` | Enable debug output | - |
 | `-V, --version` | Show version | - |
@@ -77,19 +79,13 @@ ratio-master.sh [OPTIONS] <file.torrent>
 ### Examples
 
 ```bash
-# Basic simulation (5 MB at 512 KB/s)
+# Start announcing with default speed (512 KB/s, runs until Ctrl+C)
 ./ratio-master.sh my-file.torrent
 
 # Custom speed (1 MB/s)
 ./ratio-master.sh --speed 1024 my-file.torrent
 
-# Simulate uploading 50 MB
-./ratio-master.sh --size 50 my-file.torrent
-
-# Fixed duration (30 seconds, speed auto-calculated)
-./ratio-master.sh --time 30 my-file.torrent
-
-# Inspect torrent metadata only
+# Inspect torrent metadata and info_hash only
 ./ratio-master.sh --dry-run my-file.torrent
 ```
 
@@ -102,17 +98,26 @@ ratio-master.sh [OPTIONS] <file.torrent>
   Pieces:        400 (256 KB/piece)
   Tracker:       http://tracker.example.com:8080/announce
 
-  SIMULATION PARAMETERS
-  Simulated upload: 5 MB
+  ANNOUNCE PARAMETERS
   Speed:            512 KB/s
-  Estimated time:   10s
+  Mode:             Announce (Ctrl+C to stop)
 
-  [████████████████████████████████████████] 100% | 5 MB / 5 MB | 512 KB/s | ETA 0s
+  STARTING ANNOUNCES
+  (Ctrl+C to stop)
+
+  Tracker responded OK (interval: 1800s)
+
+  5 MB uploaded | ratio 0.05 | 512 KB/s | 10s elapsed | next announce in 29m50s
+
+  ^C
+
+  ANNOUNCE STOPPED (Ctrl+C)
 
   RESULTS
   Uploaded:      5 MB
+  Duration:      10s
   Torrent size:  100 MB
-  Simulated ratio: 0.05
+  Reported ratio: 0.05
   Status:        Ratio below 1.0
 ```
 
@@ -133,6 +138,18 @@ Tips for maintaining a good ratio on private trackers:
 1. **Seed after downloading** - leave your client running
 2. **Grab freeleech torrents** - download doesn't count against your ratio
 3. **Use a seedbox** - if your home connection is limited
+
+## How It Works
+
+1. **Parse torrent file** - Extract tracker URL, torrent name, size, pieces
+2. **Compute info_hash** - Pure shell bencode parser + SHA1 (via `shasum` or `openssl`)
+3. **Generate peer_id** - Random peer ID in the format `-RM0100-<12 hex chars>`
+4. **Send `started` announce** - Initial HTTP request with `event=started`
+5. **Increment upload counter** - Simulate upload at specified speed
+6. **Send periodic announces** - Regular updates based on tracker's interval
+7. **Send `stopped` announce** - On Ctrl+C, send `event=stopped` before exiting
+
+All announces include: `info_hash`, `peer_id`, `uploaded`, `downloaded`, `left`, `port`, `compact`, and optional `event`.
 
 ## Testing
 
@@ -159,6 +176,7 @@ The test suite covers:
 - Torrent parsing (single-file, multi-file, minimal, large)
 - All CLI options and shorthands
 - `format_size` unit conversion with decimal precision
+- `compute_info_hash` computation in pure shell
 - Color mode and NO_COLOR compliance
 
 ## Project Structure
@@ -168,8 +186,9 @@ ratio-master/
 ├── ratio-master.sh              # Main script
 ├── test.torrent                 # Sample torrent file
 ├── tests/
-│   ├── ratio-master.bats        # Test suite (37 tests)
-│   └── generate-fixtures.sh     # Generates test torrent files
+│   ├── ratio-master.bats        # Test suite (33 tests)
+│   ├── generate-fixtures.sh     # Generates test torrent files
+│   └── fixtures/                # Test .torrent files
 ├── .github/
 │   └── workflows/
 │       └── ci.yml               # ShellCheck + tests on Ubuntu & macOS
