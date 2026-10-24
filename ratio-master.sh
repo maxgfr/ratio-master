@@ -693,10 +693,15 @@ start_peer_listener() {
     } >> "$LISTENER_TMPDIR/response"
 
     # Background listener loop: accept connections, send BT handshake+bitfield
+    # nc runs in the background so the trap can kill it: otherwise it
+    # outlives the script, still listening on the port
     (
-        trap 'exit 0' TERM INT
+        nc_pid=""
+        trap 'kill "$nc_pid" 2>/dev/null; exit 0' TERM INT
         while true; do
-            "$NC_CMD" -l "$SESSION_PORT" < "$LISTENER_TMPDIR/response" >/dev/null 2>&1 || true
+            "$NC_CMD" -l "$SESSION_PORT" < "$LISTENER_TMPDIR/response" >/dev/null 2>&1 &
+            nc_pid=$!
+            wait "$nc_pid" || true
             sleep 0.2
         done
     ) &
@@ -804,7 +809,8 @@ send_announce() {
     local http_code user_agent
     user_agent=$(get_client_user_agent)
     # Client-specific headers; --header "Accept:" removes curl's default Accept: */* header
-    http_code=$(curl --silent --max-time 30 --compressed \
+    # --http1.1: real clients never negotiate HTTP/2 with HTTPS trackers
+    http_code=$(curl --silent --max-time 30 --compressed --http1.1 \
         --header "Host: ${tracker_host}" \
         --header "User-Agent: ${user_agent}" \
         --header "Accept-Encoding: gzip" \
@@ -1085,6 +1091,10 @@ run_announce_loop() {
     report_announce_result "Started"
     echo ""
 
+    # Like real clients, keep sending "started" until the tracker accepts it
+    local next_event="started"
+    [[ "$ANNOUNCE_RESULT" == "OK" ]] && next_event=""
+
     # Detect fractional sleep support
     local sleep_interval=1
     if sleep 0.1 2>/dev/null; then
@@ -1128,9 +1138,10 @@ run_announce_loop() {
 
         # Periodic announce while seeding
         if [[ $since_last -ge $ANNOUNCE_INTERVAL ]]; then
-            verbose "Seed announce (uploaded=$UPLOADED)"
-            send_announce "" || true
+            verbose "Seed announce (event=${next_event:-none}, uploaded=$UPLOADED)"
+            send_announce "$next_event" || true
             LAST_ANNOUNCE_TIME=$SECONDS
+            [[ "$ANNOUNCE_RESULT" == "OK" ]] && next_event=""
             report_announce_result "Announce ($(format_size "$UPLOADED") uploaded)"
         fi
 
@@ -1218,8 +1229,9 @@ parse_arguments() {
 ################################################################################
 
 main() {
-    setup_colors
+    # After argument parsing, so that --no-color is honored
     parse_arguments "$@"
+    setup_colors
     check_dependencies
     parse_torrent "$TORRENT_FILE"
     display_torrent_info
