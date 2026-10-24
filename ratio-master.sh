@@ -13,6 +13,10 @@
 
 set -euo pipefail
 
+# Byte semantics everywhere: bencode lengths are in bytes, and multibyte
+# locales break regex/substring matching on binary data (e.g. "pieces")
+export LC_ALL=C
+
 readonly VERSION="1.2.0"
 
 ################################################################################
@@ -41,6 +45,7 @@ SESSION_KEY=""            # random key per session (tracker identification)
 SESSION_PORT=0            # randomized port for this session
 ANNOUNCE_INTERVAL=60      # interval between announces (updated by tracker)
 LAST_ANNOUNCE_TIME=0      # epoch of last successful announce
+ANNOUNCE_RESULT=""        # OK | TRACKER_ERROR:<reason> | HTTP_ERROR:<code> | NETWORK_ERROR
 
 # Respect the NO_COLOR standard (https://no-color.org/)
 # Capture env var BEFORE replacing it with our internal variable
@@ -717,8 +722,11 @@ stop_peer_listener() {
 # TRACKER COMMUNICATION
 ################################################################################
 
+# Sets ANNOUNCE_RESULT (and ANNOUNCE_INTERVAL on success).
+# Must not be called in a subshell, or those updates are lost.
 send_announce() {
     local event="${1:-}"
+    ANNOUNCE_RESULT=""
 
     if [[ -z "$TORRENT_TRACKER" ]]; then
         verbose "No tracker URL, skipping announce"
@@ -804,14 +812,14 @@ send_announce() {
         --output "$tmpfile" --write-out '%{http_code}' "$url" 2>/dev/null) || {
         rm -f "$tmpfile"
         verbose "Network error during announce"
-        echo "NETWORK_ERROR"
+        ANNOUNCE_RESULT="NETWORK_ERROR"
         return 0
     }
 
     if [[ "$http_code" -ne 200 ]]; then
         rm -f "$tmpfile"
         verbose "HTTP error: $http_code"
-        echo "HTTP_ERROR:${http_code}"
+        ANNOUNCE_RESULT="HTTP_ERROR:${http_code}"
         return 0
     fi
 
@@ -823,8 +831,9 @@ parse_tracker_response() {
     local response_file="$1"
     local content
 
-    content=$(LC_ALL=C cat "$response_file" 2>/dev/null) || {
-        echo "NETWORK_ERROR"
+    # Compact peer lists contain null bytes: strip them before bash sees them
+    content=$(tr -d '\0' < "$response_file" 2>/dev/null) || {
+        ANNOUNCE_RESULT="NETWORK_ERROR"
         return 0
     }
 
@@ -834,7 +843,7 @@ parse_tracker_response() {
         local after="${content#*14:failure reason"${reason_len}":}"
         local reason="${after:0:$reason_len}"
         verbose "Tracker failure: $reason"
-        echo "TRACKER_ERROR:${reason}"
+        ANNOUNCE_RESULT="TRACKER_ERROR:${reason}"
         return 0
     fi
 
@@ -844,7 +853,31 @@ parse_tracker_response() {
         verbose "Tracker interval: ${ANNOUNCE_INTERVAL}s"
     fi
 
-    echo "OK"
+    ANNOUNCE_RESULT="OK"
+}
+
+# Print the outcome of the last announce on its own line
+report_announce_result() {
+    local label="$1"
+    # Clear the live status line first (same sequence as show_status)
+    printf '\r\033[K'
+    case "$ANNOUNCE_RESULT" in
+        OK)
+            echo "  ${GREEN}${label}: tracker responded OK (interval: ${ANNOUNCE_INTERVAL}s)${RESET}"
+            ;;
+        TRACKER_ERROR:*)
+            echo "  ${RED}${label}: tracker error: ${ANNOUNCE_RESULT#TRACKER_ERROR:}${RESET}"
+            ;;
+        HTTP_ERROR:*)
+            echo "  ${YELLOW}${label}: HTTP error: ${ANNOUNCE_RESULT#HTTP_ERROR:}${RESET}"
+            ;;
+        NETWORK_ERROR)
+            echo "  ${YELLOW}${label}: network error (will retry)${RESET}"
+            ;;
+        *)
+            echo "  ${YELLOW}${label}: no announce sent (no tracker URL)${RESET}"
+            ;;
+    esac
 }
 
 ################################################################################
@@ -1006,9 +1039,10 @@ show_final_results() {
 
 send_stopped_and_exit() {
     verbose "Sending stopped announce..."
-    local result
-    result=$(send_announce "stopped") || true
-    verbose "Stopped announce result: ${result:-empty}"
+    # Ignore further signals while the stopped announce is in flight
+    trap '' INT TERM HUP
+    send_announce "stopped" || true
+    verbose "Stopped announce result: ${ANNOUNCE_RESULT:-empty}"
     stop_peer_listener
     show_final_results
     exit 0
@@ -1027,8 +1061,9 @@ run_announce_loop() {
         torrent_size=$((1024 * 1024 * 1024))  # 1 GB default
     fi
 
-    # Seed mode: pretend we already have the full file
-    DOWNLOADED=$torrent_size
+    # Seed mode: we have the full file (left=0) but downloaded nothing this
+    # session; reporting the full size would be counted as download by the tracker
+    DOWNLOADED=0
     UPLOADED=0
     LEFT=0
 
@@ -1046,22 +1081,8 @@ run_announce_loop() {
 
     # Send initial "started" announce (left=0 = seeder)
     verbose "Sending started announce (left=$LEFT)..."
-    local result
-    result=$(send_announce "started")
-    case "$result" in
-        OK)
-            echo "  ${GREEN}Tracker responded OK (interval: ${ANNOUNCE_INTERVAL}s)${RESET}"
-            ;;
-        TRACKER_ERROR:*)
-            echo "  ${RED}Tracker error: ${result#TRACKER_ERROR:}${RESET}"
-            ;;
-        HTTP_ERROR:*)
-            echo "  ${YELLOW}HTTP error: ${result#HTTP_ERROR:}${RESET}"
-            ;;
-        NETWORK_ERROR)
-            echo "  ${YELLOW}Network error (will retry)${RESET}"
-            ;;
-    esac
+    send_announce "started" || true
+    report_announce_result "Started"
     echo ""
 
     # Detect fractional sleep support
@@ -1077,8 +1098,8 @@ run_announce_loop() {
         updates_per_sec=1
     fi
 
-    # Set up SIGINT trap
-    trap 'send_stopped_and_exit' INT
+    # Send "stopped" on Ctrl+C, kill or terminal close
+    trap 'send_stopped_and_exit' INT TERM HUP
 
     # Hide cursor during loop (terminal only)
     [[ -t 1 ]] && printf '\033[?25l'
@@ -1108,9 +1129,9 @@ run_announce_loop() {
         # Periodic announce while seeding
         if [[ $since_last -ge $ANNOUNCE_INTERVAL ]]; then
             verbose "Seed announce (uploaded=$UPLOADED)"
-            result=$(send_announce "")
+            send_announce "" || true
             LAST_ANNOUNCE_TIME=$SECONDS
-            verbose "Announce result: $result"
+            report_announce_result "Announce ($(format_size "$UPLOADED") uploaded)"
         fi
 
         sleep "$sleep_interval"

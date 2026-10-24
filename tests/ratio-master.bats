@@ -161,6 +161,15 @@ FIXTURES="$BATS_TEST_DIRNAME/fixtures"
     [[ "$output" == *"75 MB"* ]]
 }
 
+@test "parses binary pieces and UTF-8 name under a UTF-8 locale" {
+    run env LC_ALL=en_US.UTF-8 "$SCRIPT" --dry-run --no-color "$FIXTURES/binary.torrent"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Name:          Série-Été"$'\n'* ]]
+    # 52428800 + 26214400 = 78643200 = 75 MB = 150 pieces of 512 KB
+    [[ "$output" == *"Size:          75 MB"* ]]
+    [[ "$output" == *"Pieces:        150 "* ]]
+}
+
 @test "parses minimal torrent correctly" {
     run "$SCRIPT" --dry-run --no-color "$FIXTURES/minimal.torrent"
     [ "$status" -eq 0 ]
@@ -244,7 +253,8 @@ FIXTURES="$BATS_TEST_DIRNAME/fixtures"
 }
 
 @test "format_size handles decimal precision" {
-    run bash -c "
+    # The script runs with LC_ALL=C (decimal point, not comma)
+    run env LC_ALL=C bash -c "
         format_size() {
             local bytes=\$1
             if [[ \$bytes -lt 1024 ]]; then echo \"\${bytes} B\"; return; fi
