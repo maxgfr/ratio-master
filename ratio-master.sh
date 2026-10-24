@@ -37,6 +37,11 @@ SIMULATION_START=0
 DRY_RUN=false
 VERBOSE=false
 CLIENT="qbittorrent"
+DNS_NAME=""               # resolver label for display (empty = system resolver)
+DOH_URL=""                # DNS-over-HTTPS endpoint passed to curl --doh-url
+DNS_CHECK=""              # after a network error: blocked | unresolved | ok
+DNS_CHECK_IP=""           # address the system resolver gave for the tracker
+DNS_TIP_SHOWN=false
 
 INFO_HASH=""              # info_hash URL-encoded (%xx%xx...)
 INFO_HASH_HEX=""          # info_hash in hex (for display)
@@ -118,6 +123,92 @@ get_client_reserved_bytes() {
         # uTorrent: DHT + Extension Protocol + Fast Extensions
         utorrent)    printf '\x00\x00\x00\x00\x00\x10\x00\x05' ;;
     esac
+}
+
+################################################################################
+# DNS PROFILES
+################################################################################
+
+# Select the resolver for tracker requests: a preset name or a DoH URL.
+# Bypasses the system resolver (e.g. ISP DNS that blocks the tracker).
+set_dns() {
+    local dns_lower
+    dns_lower=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+    case "$dns_lower" in
+        system)
+            DNS_NAME="" DOH_URL="" ;;
+        cloudflare|cf)
+            DNS_NAME="Cloudflare" DOH_URL="https://cloudflare-dns.com/dns-query" ;;
+        google)
+            DNS_NAME="Google" DOH_URL="https://dns.google/dns-query" ;;
+        quad9)
+            DNS_NAME="Quad9" DOH_URL="https://dns.quad9.net/dns-query" ;;
+        https://*)
+            DNS_NAME="$1" DOH_URL="$1" ;;
+        *)
+            error "Unknown DNS: $1 (supported: system, cloudflare, google, quad9, or a https:// DoH URL)" ;;
+    esac
+}
+
+get_dns_name() {
+    if [[ -n "$DOH_URL" ]]; then
+        echo "${DNS_NAME} (DNS-over-HTTPS)"
+    else
+        echo "System resolver"
+    fi
+}
+
+get_tracker_host() {
+    echo "$TORRENT_TRACKER" | sed -E 's|^[a-z]+://([^/:]+).*|\1|'
+}
+
+# After a network error with the system resolver, look at what it returns
+# for the tracker: ISP blocks answer a loopback/null address or nothing
+check_system_dns() {
+    if [[ -n "$DNS_CHECK" || -n "$DOH_URL" ]]; then
+        return 0
+    fi
+    local tracker_root trace
+    tracker_root=$(echo "$TORRENT_TRACKER" | sed -E 's|^([a-z]+://[^/]+).*|\1|')
+    trace=$(curl -sv --max-time 5 -o /dev/null "${tracker_root}/" 2>&1) || true
+
+    # "*   Trying [::1]:443..." or "*   Trying 127.0.0.1:443..."
+    DNS_CHECK_IP=$(echo "$trace" | sed -nE \
+        -e 's/^\* +Trying \[([0-9a-fA-F:.]+)\].*/\1/p' \
+        -e 's/^\* +Trying ([0-9.]+).*/\1/p' | head -n 1) || true
+
+    if [[ "$trace" == *"Could not resolve host"* ]]; then
+        DNS_CHECK="unresolved"
+    else
+        case "$DNS_CHECK_IP" in
+            127.*|0.0.0.0|::1|::) DNS_CHECK="blocked" ;;
+            *)                    DNS_CHECK="ok" ;;
+        esac
+    fi
+    verbose "System DNS check: ${DNS_CHECK} (${DNS_CHECK_IP:-no address})"
+}
+
+# Explain a DNS block once, with the option to get around it
+show_dns_tip() {
+    [[ "$DNS_TIP_SHOWN" == true ]] && return 0
+    local host
+    host=$(get_tracker_host)
+    case "$DNS_CHECK" in
+        blocked)
+            echo "  ${BOLD}${YELLOW}It doesn't work: your DNS resolves ${host} to ${DNS_CHECK_IP},${RESET}"
+            echo "  ${BOLD}${YELLOW}so the tracker is probably blocked by your ISP.${RESET}"
+            ;;
+        unresolved)
+            echo "  ${BOLD}${YELLOW}It doesn't work: your DNS could not resolve ${host}.${RESET}"
+            echo "  ${BOLD}${YELLOW}If your ISP blocks the tracker, a different DNS will fix it.${RESET}"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+    echo "  ${BOLD}I recommend the --dns option, e.g.:${RESET}"
+    echo "    ratio-master --dns cloudflare <file.torrent>   (or: google, quad9)"
+    DNS_TIP_SHOWN=true
 }
 
 ################################################################################
@@ -221,6 +312,18 @@ check_dependencies() {
         error "Missing required dependencies: ${missing[*]}"
     fi
 
+    # --doh-url needs curl 7.62+
+    if [[ -n "$DOH_URL" ]]; then
+        local curl_version major minor
+        curl_version=$(curl --version | awk 'NR == 1 { print $2 }')
+        major="${curl_version%%.*}"
+        minor="${curl_version#*.}"
+        minor="${minor%%.*}"
+        if [[ "$major" -lt 7 || ( "$major" -eq 7 && "$minor" -lt 62 ) ]]; then
+            error "Option --dns requires curl 7.62 or newer (found ${curl_version})"
+        fi
+    fi
+
     # Detect netcat for peer listener (optional but recommended)
     if command -v nc &>/dev/null; then
         NC_CMD="nc"
@@ -256,6 +359,13 @@ OPTIONS
         Supported: qbittorrent (qb), utorrent (ut)
         Default: qbittorrent
 
+    -d, --dns <name|url>
+        DNS resolver for tracker requests (DNS-over-HTTPS), useful
+        when your ISP's DNS blocks the tracker
+        Supported: system, cloudflare (cf), google, quad9,
+        or any https:// DoH URL
+        Default: system
+
     -s, --speed <KB/s>
         Upload speed in kilobytes per second
         Default: 512 KB/s
@@ -284,6 +394,9 @@ EXAMPLES
 
     # Emulate uTorrent instead of qBittorrent
     ratio-master.sh --client utorrent my-file.torrent
+
+    # Resolve the tracker through Cloudflare instead of the ISP's DNS
+    ratio-master.sh --dns cloudflare my-file.torrent
 
     # Display info only
     ratio-master.sh --dry-run my-file.torrent
@@ -808,9 +921,15 @@ send_announce() {
 
     local http_code user_agent
     user_agent=$(get_client_user_agent)
+    local dns_args=()
+    if [[ -n "$DOH_URL" ]]; then
+        dns_args=(--doh-url "$DOH_URL")
+    fi
     # Client-specific headers; --header "Accept:" removes curl's default Accept: */* header
     # --http1.1: real clients never negotiate HTTP/2 with HTTPS trackers
+    # (empty-array expansion guarded for set -u on bash < 4.4)
     http_code=$(curl --silent --max-time 30 --compressed --http1.1 \
+        ${dns_args[@]+"${dns_args[@]}"} \
         --header "Host: ${tracker_host}" \
         --header "User-Agent: ${user_agent}" \
         --header "Accept-Encoding: gzip" \
@@ -879,6 +998,8 @@ report_announce_result() {
             ;;
         NETWORK_ERROR)
             echo "  ${YELLOW}${label}: network error (will retry)${RESET}"
+            check_system_dns
+            show_dns_tip
             ;;
         *)
             echo "  ${YELLOW}${label}: no announce sent (no tracker URL)${RESET}"
@@ -920,6 +1041,7 @@ display_torrent_info() {
     echo ""
     echo "${BOLD}  ANNOUNCE PARAMETERS${RESET}"
     echo "  ${DIM}Client:${RESET}           $(get_client_name)"
+    echo "  ${DIM}DNS:${RESET}              $(get_dns_name)"
     echo "  ${DIM}Speed:${RESET}            ${UPLOAD_SPEED} KB/s"
     echo "  ${DIM}Mode:${RESET}             Seed (Ctrl+C to stop)"
     if [[ -n "$NC_CMD" ]]; then
@@ -1163,6 +1285,13 @@ parse_arguments() {
             -V|--version)
                 show_version
                 exit 0
+                ;;
+            -d|--dns)
+                if [[ -z "${2:-}" ]]; then
+                    error "Option --dns requires a value"
+                fi
+                set_dns "$2"
+                shift 2
                 ;;
             -c|--client)
                 if [[ -z "${2:-}" ]]; then

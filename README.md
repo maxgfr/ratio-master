@@ -21,6 +21,7 @@ A torrent ratio tool that sends real HTTP announce requests to BitTorrent tracke
 - Computes info_hash in pure shell (no Python dependency)
 - Emulates **qBittorrent 4.6.2** (default) or **uTorrent 3.3.2** (`--client` option)
 - Sends real HTTP announces to the tracker (`started`, regular updates, `stopped`)
+- Optional DNS-over-HTTPS resolver (`--dns`) when your ISP's DNS blocks the tracker
 - Reports incremental upload values with configurable speed
 - Displays live status: uploaded, ratio, speed, elapsed time, next announce
 - Works on **Linux** and **macOS**
@@ -62,10 +63,18 @@ chmod +x ratio-master.sh
 ln -s "$(pwd)/ratio-master.sh" /usr/local/bin/ratio-master
 ```
 
+### As an agent skill
+
+A [`SKILL.md`](skills/ratio-master/SKILL.md) teaches coding agents (Claude Code, Cursor, Codex…) how to drive the CLI and troubleshoot announces:
+
+```bash
+npx skills add maxgfr/ratio-master
+```
+
 ### Requirements
 
 - **bash** 4.0+
-- **curl** (for HTTP requests to tracker)
+- **curl** (for HTTP requests to tracker; 7.62+ for `--dns`)
 - **shasum** or **openssl** (for SHA1 computation of info_hash)
 - **awk** (included on all Unix systems)
 
@@ -80,6 +89,7 @@ ratio-master [OPTIONS] <file.torrent>
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-c, --client <name>` | BitTorrent client to emulate (`qbittorrent`, `utorrent`) | `qbittorrent` |
+| `-d, --dns <name\|url>` | DNS resolver for tracker requests, via DNS-over-HTTPS (`system`, `cloudflare`, `google`, `quad9`, or a `https://` DoH URL) | `system` |
 | `-s, --speed <KB/s>` | Upload speed in KB/s | `512` |
 | `--dry-run` | Show torrent info and info_hash without sending announces | - |
 | `--no-color` | Disable colored output | - |
@@ -101,6 +111,12 @@ ratio-master --client utorrent my-file.torrent
 
 # Short aliases work too: qb, ut
 ratio-master -c ut my-file.torrent
+
+# Resolve the tracker through Cloudflare when the ISP's DNS blocks it
+ratio-master --dns cloudflare my-file.torrent
+
+# Or any DNS-over-HTTPS endpoint
+ratio-master --dns https://dns.example.org/dns-query my-file.torrent
 
 # Inspect torrent metadata and info_hash only
 ratio-master --dry-run my-file.torrent
@@ -194,6 +210,8 @@ The test suite covers:
 - Torrent parsing (single-file, multi-file, minimal, large)
 - All CLI options and shorthands
 - Client selection (`--client`, `-c`, aliases, case-insensitivity, error cases)
+- DNS selection (`--dns`, `-d`, presets, custom DoH URL, error cases)
+- DNS block detection (loopback answer, unresolvable tracker) and the `--dns` hint
 - `format_size` unit conversion with decimal precision
 - `compute_info_hash` computation in pure shell
 - Color mode and NO_COLOR compliance
@@ -204,8 +222,10 @@ The test suite covers:
 ratio-master/
 ├── ratio-master.sh              # Main script
 ├── test.torrent                 # Sample torrent file
+├── skills/
+│   └── ratio-master/SKILL.md    # Agent skill (npx skills add)
 ├── tests/
-│   ├── ratio-master.bats        # Test suite (44 tests)
+│   ├── ratio-master.bats        # Test suite (53 tests)
 │   ├── generate-fixtures.sh     # Generates test torrent files
 │   └── fixtures/                # Test .torrent files
 ├── .github/

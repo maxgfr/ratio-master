@@ -156,7 +156,22 @@ generate_binary() {
         "info" "$info"
 }
 
-# 6. Invalid file (not a torrent)
+# 6. Torrents whose tracker host looks DNS-blocked: resolves to loopback,
+#    or does not resolve at all
+generate_tracker_host() {
+    local info
+    info=$(write_dict \
+        "length" "$(bencode_int 1024)" \
+        "name" "$(bencode_str 'dns-check')" \
+        "piece length" "$(bencode_int 16384)" \
+        "pieces" "$(bencode_raw_str 20 'f')")
+
+    write_dict \
+        "announce" "$(bencode_str "$1")" \
+        "info" "$info"
+}
+
+# 7. Invalid file (not a torrent)
 generate_invalid() {
     printf 'This is not a torrent file'
 }
@@ -170,6 +185,8 @@ generate_multifile > "$FIXTURES_DIR/multifile.torrent"
 generate_minimal   > "$FIXTURES_DIR/minimal.torrent"
 generate_large     > "$FIXTURES_DIR/large.torrent"
 generate_binary    > "$FIXTURES_DIR/binary.torrent"
+generate_tracker_host "http://localhost:9/announce" > "$FIXTURES_DIR/loopback-tracker.torrent"
+generate_tracker_host "http://tracker.invalid/announce" > "$FIXTURES_DIR/unresolved-tracker.torrent"
 generate_invalid   > "$FIXTURES_DIR/invalid.torrent"
 
 echo "All fixtures generated successfully (pure bash)"
