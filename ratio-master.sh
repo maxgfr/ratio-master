@@ -39,6 +39,9 @@ VERBOSE=false
 CLIENT="qbittorrent"
 DNS_NAME=""               # resolver label for display (empty = system resolver)
 DOH_URL=""                # DNS-over-HTTPS endpoint passed to curl --doh-url
+DNS_CHECK=""              # after a network error: blocked | unresolved | ok
+DNS_CHECK_IP=""           # address the system resolver gave for the tracker
+DNS_TIP_SHOWN=false
 
 INFO_HASH=""              # info_hash URL-encoded (%xx%xx...)
 INFO_HASH_HEX=""          # info_hash in hex (for display)
@@ -153,6 +156,59 @@ get_dns_name() {
     else
         echo "System resolver"
     fi
+}
+
+get_tracker_host() {
+    echo "$TORRENT_TRACKER" | sed -E 's|^[a-z]+://([^/:]+).*|\1|'
+}
+
+# After a network error with the system resolver, look at what it returns
+# for the tracker: ISP blocks answer a loopback/null address or nothing
+check_system_dns() {
+    if [[ -n "$DNS_CHECK" || -n "$DOH_URL" ]]; then
+        return 0
+    fi
+    local tracker_root trace
+    tracker_root=$(echo "$TORRENT_TRACKER" | sed -E 's|^([a-z]+://[^/]+).*|\1|')
+    trace=$(curl -sv --max-time 5 -o /dev/null "${tracker_root}/" 2>&1) || true
+
+    # "*   Trying [::1]:443..." or "*   Trying 127.0.0.1:443..."
+    DNS_CHECK_IP=$(echo "$trace" | sed -nE \
+        -e 's/^\* +Trying \[([0-9a-fA-F:.]+)\].*/\1/p' \
+        -e 's/^\* +Trying ([0-9.]+).*/\1/p' | head -n 1) || true
+
+    if [[ "$trace" == *"Could not resolve host"* ]]; then
+        DNS_CHECK="unresolved"
+    else
+        case "$DNS_CHECK_IP" in
+            127.*|0.0.0.0|::1|::) DNS_CHECK="blocked" ;;
+            *)                    DNS_CHECK="ok" ;;
+        esac
+    fi
+    verbose "System DNS check: ${DNS_CHECK} (${DNS_CHECK_IP:-no address})"
+}
+
+# Explain a DNS block once, with the option to get around it
+show_dns_tip() {
+    [[ "$DNS_TIP_SHOWN" == true ]] && return 0
+    local host
+    host=$(get_tracker_host)
+    case "$DNS_CHECK" in
+        blocked)
+            echo "  ${BOLD}${YELLOW}It doesn't work: your DNS resolves ${host} to ${DNS_CHECK_IP},${RESET}"
+            echo "  ${BOLD}${YELLOW}so the tracker is probably blocked by your ISP.${RESET}"
+            ;;
+        unresolved)
+            echo "  ${BOLD}${YELLOW}It doesn't work: your DNS could not resolve ${host}.${RESET}"
+            echo "  ${BOLD}${YELLOW}If your ISP blocks the tracker, a different DNS will fix it.${RESET}"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+    echo "  ${BOLD}I recommend the --dns option, e.g.:${RESET}"
+    echo "    ratio-master --dns cloudflare <file.torrent>   (or: google, quad9)"
+    DNS_TIP_SHOWN=true
 }
 
 ################################################################################
@@ -941,11 +997,9 @@ report_announce_result() {
             echo "  ${YELLOW}${label}: HTTP error: ${ANNOUNCE_RESULT#HTTP_ERROR:}${RESET}"
             ;;
         NETWORK_ERROR)
-            if [[ -z "$DOH_URL" ]]; then
-                echo "  ${YELLOW}${label}: network error (will retry; if your DNS blocks the tracker, try --dns cloudflare)${RESET}"
-            else
-                echo "  ${YELLOW}${label}: network error (will retry)${RESET}"
-            fi
+            echo "  ${YELLOW}${label}: network error (will retry)${RESET}"
+            check_system_dns
+            show_dns_tip
             ;;
         *)
             echo "  ${YELLOW}${label}: no announce sent (no tracker URL)${RESET}"

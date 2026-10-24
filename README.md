@@ -63,6 +63,14 @@ chmod +x ratio-master.sh
 ln -s "$(pwd)/ratio-master.sh" /usr/local/bin/ratio-master
 ```
 
+### As an agent skill
+
+A [`SKILL.md`](skills/ratio-master/SKILL.md) teaches coding agents (Claude Code, Cursor, Codex…) how to drive the CLI and troubleshoot announces:
+
+```bash
+npx skills add maxgfr/ratio-master
+```
+
 ### Requirements
 
 - **bash** 4.0+
@@ -203,6 +211,7 @@ The test suite covers:
 - All CLI options and shorthands
 - Client selection (`--client`, `-c`, aliases, case-insensitivity, error cases)
 - DNS selection (`--dns`, `-d`, presets, custom DoH URL, error cases)
+- DNS block detection (loopback answer, unresolvable tracker) and the `--dns` hint
 - `format_size` unit conversion with decimal precision
 - `compute_info_hash` computation in pure shell
 - Color mode and NO_COLOR compliance
@@ -213,8 +222,10 @@ The test suite covers:
 ratio-master/
 ├── ratio-master.sh              # Main script
 ├── test.torrent                 # Sample torrent file
+├── skills/
+│   └── ratio-master/SKILL.md    # Agent skill (npx skills add)
 ├── tests/
-│   ├── ratio-master.bats        # Test suite (51 tests)
+│   ├── ratio-master.bats        # Test suite (53 tests)
 │   ├── generate-fixtures.sh     # Generates test torrent files
 │   └── fixtures/                # Test .torrent files
 ├── .github/

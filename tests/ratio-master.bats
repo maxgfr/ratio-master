@@ -422,6 +422,29 @@ FIXTURES="$BATS_TEST_DIRNAME/fixtures"
     [[ "$output" == *"Unknown DNS"* ]]
 }
 
+# Runs the announce loop for a few seconds, then stops it like Ctrl+C would
+run_briefly() {
+    "$SCRIPT" --no-color "$@" > "$BATS_TEST_TMPDIR/out" 2>&1 &
+    local pid=$!
+    sleep 4
+    kill -TERM "$pid"
+    wait "$pid" || true
+    output=$(cat "$BATS_TEST_TMPDIR/out")
+}
+
+@test "network error with a loopback DNS answer recommends --dns" {
+    run_briefly "$FIXTURES/loopback-tracker.torrent"
+    [[ "$output" == *"network error"* ]]
+    [[ "$output" == *"your DNS resolves localhost to"* ]]
+    [[ "$output" == *"--dns cloudflare"* ]]
+}
+
+@test "network error with an unresolvable tracker recommends --dns" {
+    run_briefly "$FIXTURES/unresolved-tracker.torrent"
+    [[ "$output" == *"could not resolve tracker.invalid"* ]]
+    [[ "$output" == *"--dns cloudflare"* ]]
+}
+
 @test "help text shows --dns option" {
     run "$SCRIPT" -h
     [ "$status" -eq 0 ]
