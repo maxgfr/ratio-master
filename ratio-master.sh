@@ -17,7 +17,7 @@ set -euo pipefail
 # locales break regex/substring matching on binary data (e.g. "pieces")
 export LC_ALL=C
 
-readonly VERSION="1.2.0"
+readonly VERSION="1.2.1"
 
 ################################################################################
 # DEFAULT CONFIGURATION
