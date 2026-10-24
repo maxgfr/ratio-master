@@ -3,6 +3,9 @@
 
 set -euo pipefail
 
+# Byte lengths for bencode strings (non-ASCII names must count bytes, not chars)
+export LC_ALL=C
+
 FIXTURES_DIR="$(cd "$(dirname "$0")" && pwd)/fixtures"
 mkdir -p "$FIXTURES_DIR"
 
@@ -128,7 +131,32 @@ generate_large() {
         "info" "$info"
 }
 
-# 5. Invalid file (not a torrent)
+# 5. Multi-file torrent with a UTF-8 name and binary pieces (50 Mo + 25 Mo = 75 Mo)
+# Real pieces are SHA1 bytes >= 0x80: they broke parsing under UTF-8 locales
+generate_binary() {
+    local file1 file2 info
+
+    file1=$(write_dict \
+        "length" "$(bencode_int 52428800)" \
+        "path" "l$(bencode_str 'épisode1.mkv')e")
+
+    file2=$(write_dict \
+        "length" "$(bencode_int 26214400)" \
+        "path" "l$(bencode_str 'épisode2.mkv')e")
+
+    info=$(write_dict \
+        "files" "l${file1}${file2}e" \
+        "name" "$(bencode_str 'Série-Été')" \
+        "piece length" "$(bencode_int 524288)" \
+        "pieces" "$(bencode_raw_str 40 $'\xe9')" \
+        "private" "$(bencode_int 1)")
+
+    write_dict \
+        "announce" "$(bencode_str 'http://tracker.example.com/announce')" \
+        "info" "$info"
+}
+
+# 6. Invalid file (not a torrent)
 generate_invalid() {
     printf 'This is not a torrent file'
 }
@@ -141,6 +169,7 @@ generate_simple    > "$FIXTURES_DIR/simple.torrent"
 generate_multifile > "$FIXTURES_DIR/multifile.torrent"
 generate_minimal   > "$FIXTURES_DIR/minimal.torrent"
 generate_large     > "$FIXTURES_DIR/large.torrent"
+generate_binary    > "$FIXTURES_DIR/binary.torrent"
 generate_invalid   > "$FIXTURES_DIR/invalid.torrent"
 
 echo "All fixtures generated successfully (pure bash)"
