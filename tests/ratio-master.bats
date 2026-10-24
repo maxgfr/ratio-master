@@ -383,6 +383,52 @@ FIXTURES="$BATS_TEST_DIRNAME/fixtures"
 }
 
 ################################################################################
+# DNS SELECTION
+################################################################################
+
+@test "defaults to system resolver" {
+    run "$SCRIPT" --dry-run --no-color "$FIXTURES/simple.torrent"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"DNS:"*"System resolver"* ]]
+}
+
+@test "--dns cloudflare selects Cloudflare DoH" {
+    run "$SCRIPT" --dry-run --no-color --dns cloudflare "$FIXTURES/simple.torrent"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Cloudflare (DNS-over-HTTPS)"* ]]
+}
+
+@test "-d shorthand and case-insensitive preset work" {
+    run "$SCRIPT" --dry-run --no-color -d QUAD9 "$FIXTURES/simple.torrent"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Quad9 (DNS-over-HTTPS)"* ]]
+}
+
+@test "--dns accepts a custom DoH URL" {
+    run "$SCRIPT" --dry-run --no-color --dns https://doh.example.org/dns-query "$FIXTURES/simple.torrent"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"https://doh.example.org/dns-query (DNS-over-HTTPS)"* ]]
+}
+
+@test "--dns without value fails" {
+    run "$SCRIPT" --dns
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"requires a value"* ]]
+}
+
+@test "--dns with unknown resolver fails" {
+    run "$SCRIPT" --dns 1.1.1.1 "$FIXTURES/simple.torrent"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unknown DNS"* ]]
+}
+
+@test "help text shows --dns option" {
+    run "$SCRIPT" -h
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--dns"* ]]
+}
+
+################################################################################
 # BANNER
 ################################################################################
 
